@@ -19,9 +19,11 @@
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   axes chosen by firstmate at intake. A requested effort is either delivered to
+#   the selected harness or refused before launch; it is never silently omitted.
+#   Codex checks an explicit model against its live models_cache.json catalog.
+#   Missing or inconclusive catalog evidence warns and passes the value through so
+#   uncertainty does not block a potentially valid launch or erase the request.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1052,8 +1054,55 @@ model_flag_for_harness() {
   esac
 }
 
+codex_effort_catalog_result() {  # <model> <effort>
+  local model=$1 effort=$2 codex_home cache result
+  if [ -z "$model" ] || [ "$model" = default ]; then
+    printf '%s\n' unresolved-model
+    return 0
+  fi
+  if [ -n "${CODEX_HOME:-}" ]; then
+    codex_home=$CODEX_HOME
+  elif [ -n "${HOME:-}" ]; then
+    codex_home="$HOME/.codex"
+  else
+    printf '%s\n' unavailable-home
+    return 0
+  fi
+  cache="$codex_home/models_cache.json"
+  if [ ! -r "$cache" ]; then
+    printf 'unavailable-cache\t%s\n' "$cache"
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'unavailable-jq\t%s\n' "$cache"
+    return 0
+  fi
+  result=$(jq -er --arg model "$model" --arg effort "$effort" '
+    [.models[]? | select(.slug == $model)] as $matches
+    | if ($matches | length) != 1 then
+        "absent-model\t\($model)"
+      else
+        [$matches[0].supported_reasoning_levels[]?.effort] as $levels
+        | if ($levels | index($effort)) != null then
+            "supported"
+          else
+            "unsupported\t" + ($levels | join(", "))
+          end
+      end
+  ' "$cache" 2>/dev/null) || {
+    printf 'invalid-cache\t%s\n' "$cache"
+    return 0
+  }
+  printf '%s\n' "$result"
+}
+
+refuse_undeliverable_effort() {  # <harness> <effort> <detail>
+  echo "error: refusing $1 spawn because requested effort '$2' cannot be delivered: $3" >&2
+  return 1
+}
+
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 effort=$2 model=${3:-} catalog_result catalog_detail cache
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -1062,20 +1111,54 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+      # Codex effort support is model-specific and changes independently of this
+      # script. The live cache is authoritative when it has one exact model row.
+      # Unknown evidence is not a contradiction: pass the requested config through
+      # with a warning so Codex can accept a newly added level instead of fm-spawn
+      # silently replacing it with the model default.
+      catalog_result=$(codex_effort_catalog_result "$model" "$effort")
+      catalog_detail=${catalog_result#*$'\t'}
+      case "$catalog_result" in
+        supported) ;;
+        unsupported$'\t'*)
+          cache="${CODEX_HOME:-${HOME:+$HOME/.codex}}/models_cache.json"
+          refuse_undeliverable_effort codex "$effort" \
+            "model '$model' advertises only ${catalog_detail:-no reasoning levels} in $cache"
+          return 1
+          ;;
+        unresolved-model)
+          echo "warning: Codex effort '$effort' cannot be preflighted without an explicit model; passing model_reasoning_effort through for Codex to validate" >&2
+          ;;
+        absent-model$'\t'*)
+          echo "warning: Codex model '$model' is absent from the live model catalog; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        unavailable-cache$'\t'*)
+          echo "warning: Codex model catalog is unavailable at '$catalog_detail'; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        unavailable-jq$'\t'*)
+          echo "warning: jq is unavailable, so Codex model '$model' cannot be checked against '$catalog_detail'; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        invalid-cache$'\t'*)
+          echo "warning: Codex model catalog at '$catalog_detail' is invalid; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        unavailable-home)
+          echo "warning: neither CODEX_HOME nor HOME identifies the Codex model catalog; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        *)
+          echo "error: refusing codex spawn because its model-catalog result was not understood: $catalog_result" >&2
+          return 1
+          ;;
       esac
+      printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
       ;;
     grok)
       # grok exposes both --effort and --reasoning-effort; firstmate's profile
       # axis is the reasoning knob. As of grok 0.2.99, --reasoning-effort accepts
-      # only low|medium|high and rejects both xhigh and max, so omit those rather
-      # than passing a known-bad value.
+      # only low|medium|high and rejects both xhigh and max, so refuse those before
+      # endpoint creation rather than launching at Grok's default.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+        *) refuse_undeliverable_effort grok "$effort" "the verified reasoning-effort ceiling is high"; return 1 ;;
       esac
       ;;
     pi|pi-signed)
@@ -1099,13 +1182,28 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
+    opencode)
+      refuse_undeliverable_effort opencode "$effort" \
+        "its interactive launch has no verified effort flag"
+      return 1
+      ;;
+    kimi)
+      refuse_undeliverable_effort kimi "$effort" "it has no reasoning-effort flag"
+      return 1
+      ;;
+    *)
+      refuse_undeliverable_effort "${harness:-unknown harness}" "$effort" \
+        "no verified effort flag exists for this launch path"
+      return 1
+      ;;
   esac
 }
+
+# Resolve profile flags before binary-specific setup, project allocation, endpoint
+# creation, or metadata publication. A known-undeliverable effort therefore refuses
+# without leaving side effects or a durable record that falsely claims it launched.
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -2229,8 +2327,6 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

@@ -117,7 +117,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
-| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
+| codex | `--model <model>` | `-c 'model_reasoning_effort="<catalog-supported effort>"'` | Verified on codex-cli 0.144.4 (2026-08-02). The live per-model catalog in `${CODEX_HOME:-$HOME/.codex}/models_cache.json` owns the accepted range; the observed catalog advertises `max` for the 5.6 family and `ultra` for Sol and Terra. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
@@ -145,8 +145,9 @@ For an unfamiliar harness or model namespace, establish support and provider ide
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
-This preserves launch success instead of passing a known-bad value.
+`ultra` does not join firstmate's shared profile axis: the observed Codex catalog describes it as reasoning with automatic task delegation, so it changes execution topology rather than only reasoning depth, and it is not supported even by every Codex 5.6 model.
+When concrete adapter or per-model catalog evidence proves a requested effort cannot be delivered, `fm-spawn` refuses before creating an endpoint or metadata instead of launching at an unreported default.
+When the Codex catalog or exact model is unavailable, `fm-spawn` warns and passes the requested value through for Codex to validate, because uncertainty alone must not block a potentially valid dispatch and the request must never be silently discarded.
 
 ## no-mistakes skill invocation
 
