@@ -69,11 +69,11 @@ Hints only affect balance: the coverage guard keeps the partition complete and d
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of4` | 15 | 285941 ms (~285.9 s) |
-| `portable-serial-2of4` | 18 | 285940 ms (~285.9 s) |
-| `portable-serial-3of4` | 17 | 285941 ms (~285.9 s) |
-| `portable-serial-4of4` | 19 | 285940 ms (~285.9 s) |
-| imbalance | | 1 ms |
+| `portable-serial-1of4` | 15 | 285945 ms (~285.9 s) |
+| `portable-serial-2of4` | 18 | 285944 ms (~285.9 s) |
+| `portable-serial-3of4` | 17 | 285929 ms (~285.9 s) |
+| `portable-serial-4of4` | 19 | 285944 ms (~285.9 s) |
+| imbalance | | 16 ms |
 
 The single longest script, `tests/fm-pr-check-security.test.sh` at 199573 ms, is the floor for any shard count.
 
