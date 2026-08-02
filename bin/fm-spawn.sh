@@ -121,7 +121,11 @@
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
-#   Launch templates live in launch_template() below; placeholders replaced before launch:
+#   Launch templates live in launch_template() below; placeholders replaced before launch
+#   (raw launch commands receive the same substitution):
+#     __MODELFLAG__ the harness-specific model flag resolved from --model (empty when unset)
+#     __EFFORTFLAG__ the harness-specific effort flag resolved from --effort; a requested
+#                  effort is refused when the launch command lacks this placeholder
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
