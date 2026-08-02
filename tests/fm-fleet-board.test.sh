@@ -19,7 +19,8 @@
 #        (d3) NEGATIVE CONTROL: the probe goes red on a tampered artifact
 #   (e) the artifact is self-contained: no local/relative asset references
 #   (f) PRs render as full https URLs, never a bare #number, on a scan whose
-#       positive control is checked before the scan is trusted
+#       positive control is checked before the scan is trusted; (f2) a bare
+#       number inside bearings' own prose renders verbatim, never as a guess
 #   (g) the board never writes fleet state (data/, state/, backlog untouched)
 #   (h) both light and dark themes are present and driven by the viewer
 #   (i) lavish-axi is invoked by default and skipped under --no-open
@@ -367,15 +368,23 @@ pass "(e) the artifact is self-contained"
 # pull requests. Strip character references first, then scan. Like the coverage
 # assertion, this is only worth having if it can fail, so the same function is
 # run over a positive control before it is trusted on the real board.
+#
+# The scan is deliberately unanchored: "#44" is a bare reference wherever it
+# appears, whether it is spaced ("o/r #44") or run on ("o/r#44"). An earlier
+# version required a non-alphanumeric character before the "#", and a mutation
+# test showed it silently missed the run-on form.
 bare_pr_refs() {  # <html-text>; prints every bare #<number> reference found
   printf '%s\n' "$1" \
     | sed 's/&#[0-9]*;//g; s/&[A-Za-z][A-Za-z0-9]*;//g' \
-    | grep -oE '(^|[^/[:alnum:]])#[0-9]+' || true
+    | grep -oE '#[0-9]+' || true
 }
 
-# The instrument, before the measurement: it must see a real bare reference...
+# The instrument, before the measurement: it must see a real bare reference in
+# both the spaced and the run-on form...
 positive=$(bare_pr_refs "<li><span>o/r #44</span></li>")
-assert_contains "$positive" "#44" "(f) the bare-reference scan cannot detect a bare #number at all"
+assert_contains "$positive" "#44" "(f) the bare-reference scan cannot detect a spaced bare #number"
+runon=$(bare_pr_refs "<li><span>o/r#44</span></li>")
+assert_contains "$runon" "#44" "(f) the bare-reference scan cannot detect a run-on bare #number"
 # ...and must not mistake an escaped apostrophe for one.
 entities=$(bare_pr_refs "<h2>Captain&#39;s Call</h2><p>Bill &amp; Ben&#8217;s</p>")
 [ -z "$entities" ] \
@@ -388,6 +397,28 @@ assert_contains "$board" "https://github.com/o/r/pull/44" "(f) an open PR's URL 
 bare=$(bare_pr_refs "$board")
 [ -z "$bare" ] || fail "(f) the board renders a bare #number PR reference:"$'\n'"$bare"
 pass "(f) every PR renders as a full https URL, on a scan proven able to fail"
+
+# --- (f2) bearings-authored prose is rendered, never rewritten ----------------
+#
+# The scan above governs the board's OWN pull-request renderings. A bare "#4321"
+# can also arrive inside text bearings supplies - a backlog title might
+# reads "ABC-1234: bring PR #4321 green". The board carries no repository context
+# for that number, so the only honest renderings are verbatim or nothing:
+# inventing "https://github.com/<guess>/pull/5721" would put a fabricated link in
+# front of the captain. Faithful passthrough is the contract, and this pins it so
+# nobody later "fixes" the scan by guessing a URL.
+PROSE="$TMP_ROOT/bearings-prose.json"
+jq '.gates[0].title = "ABC-1234: bring PR #4321 green (upstream Sentry flood)"' \
+  "$FIXTURE" > "$PROSE"
+PROSE_HTML="$TMP_ROOT/prose.html"
+"$BOARD" --from-json "$PROSE" --out "$PROSE_HTML" --no-open >/dev/null \
+  || fail "(f2) rendering a projection with a bare number in a title failed"
+prose_board=$(cat "$PROSE_HTML")
+assert_contains "$prose_board" "bring PR #4321 green" \
+  "(f2) a bearings-supplied title is not rendered as written"
+assert_not_contains "$prose_board" "pull/5721" \
+  "(f2) the board fabricated a pull-request URL from a number it cannot resolve"
+pass "(f2) a bare number inside bearings' own text renders verbatim, never as a guessed URL"
 
 # --- (g) the board never writes fleet state ----------------------------------
 HOME_DIR="$TMP_ROOT/home"

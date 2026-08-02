@@ -22,6 +22,12 @@
 # move an item between sections. A field this board wants but bearings does not
 # expose belongs in the bearings projection, not here.
 #
+# PULL REQUESTS render as their full https URL, never a bare "#number". That
+# governs the board's own PR renderings. A bare number can also arrive inside
+# text bearings supplies, such as a backlog title reading "bring PR #4321
+# green"; the board holds no repository context for that number, so it renders
+# the text as written rather than fabricating a URL from a guessed repository.
+#
 # THE BOARD NEVER WRITES FLEET STATE. It renders and collects. An answered
 # decision is queued back through Lavish and returned by `lavish-axi poll`;
 # firstmate reads that response and applies it with bin/fm-decision-hold.sh. The
