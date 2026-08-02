@@ -190,8 +190,9 @@ pass "(c) omitted surfaces are visibly disclosed"
 # pass by echoing constants the test itself supplied - case (d3) proves that by
 # stripping an attribute from the artifact and requiring the probe to go red.
 
-probe_decision() {  # <html> <decision-id> <intent> <typed-answer>; emits JSON
-  BOARD_HTML=$1 WANT_ID=$2 INTENT=$3 ANSWER=$4 node --input-type=module <<'EOF'
+probe_decision() {  # <html> <decision-id> <intent> <typed-answer> [timing]; emits JSON
+  BOARD_HTML=$1 WANT_ID=$2 INTENT=$3 ANSWER=$4 LAVISH_TIMING=${5:-early} \
+    node --input-type=module <<'EOF'
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.env.BOARD_HTML, "utf8");
@@ -255,22 +256,46 @@ const deferButton = node({ closest: (sel) => (sel === "[data-fm-decision-form]" 
 
 const queued = [];
 const listeners = {};
+const timers = [];
+// A real control and a real offline notice, so the probe can see whether the
+// board disabled anything at load time.
+const decisionButton = node({ disabled: false });
+const offlineNote = node();
 const documentShim = {
   documentElement: node(),
   getElementById: () => null,
-  querySelectorAll: () => [],
+  querySelectorAll(sel) {
+    if (sel === "[data-fm-decision-form] button") return [decisionButton];
+    if (sel === "[data-fm-offline]") return [offlineNote];
+    return [];
+  },
   addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
 };
+const api = { queuePrompt: (prompt, opts) => queued.push({ prompt, opts }) };
+// timing=early: the API is present before the board's script runs.
+// timing=late:  it appears only after, which is what the real review surface
+//               does - it injects into the artifact frame on its own schedule.
+// timing=never: a plain file opened straight off disk.
+const timing = process.env.LAVISH_TIMING || "early";
 const windowShim = {
-  lavish: { queuePrompt: (prompt, opts) => queued.push({ prompt, opts }) },
   matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setTimeout: (fn) => { timers.push(fn); return timers.length; },
+  location: { protocol: timing === "never" ? "file:" : "http:" },
 };
+if (timing === "early") windowShim.lavish = api;
+
 const localStorageShim = { getItem: () => null, setItem() {} };
 
 // Shadow the globals the board's script closes over, then let it install itself.
 new Function("document", "window", "localStorage", scripts.join("\n;\n"))(
   documentShim, windowShim, localStorageShim,
 );
+
+// State the board settled on at load, BEFORE any late injection.
+const disabledAtLoad = decisionButton.disabled;
+const offlineShownAtLoad = offlineNote.hidden === false;
+
+if (timing === "late") windowShim.lavish = api;
 
 const type = intent === "defer" ? "click" : "submit";
 const target = intent === "defer" ? deferButton : {
@@ -289,6 +314,9 @@ console.log(JSON.stringify({
   opts: first?.opts ?? null,
   noteHidden: queuedNote.hidden,
   noteText: queuedNote.textContent,
+  disabledAtLoad,
+  offlineShownAtLoad,
+  offlineShown: offlineNote.hidden === false,
 }));
 EOF
 }
@@ -336,6 +364,39 @@ assert_contains "$(printf '%s' "$defer_probe" | jq -r '.prompt')" \
 assert_contains "$(printf '%s' "$defer_probe" | jq -r '.opts.data.intent')" "defer" \
   "(d) a deferral is indistinguishable from a substantive answer"
 pass "(d2) an unsubmitted answer is never queued, and Defer identifies itself"
+
+# (d4) REGRESSION: a late-injected review-surface API must still work ----------
+#
+# Found by opening the real board through the review surface: it injects its API
+# into the artifact frame AFTER the page's inline scripts run, so an earlier
+# load-time probe concluded "not live", disabled every control, and left all ten
+# decisions unanswerable on a board that was in fact perfectly live. A DOM probe
+# that hands the API over up front cannot see that, which is why this case
+# withholds it until after the board's script has installed itself.
+late=$(probe_decision "$FULL_HTML" "alpha-ship-decision-schema-shape" answer "Flat." late) \
+  || fail "(d4) the late-injection probe could not run"
+[ "$(printf '%s' "$late" | jq -r '.disabledAtLoad')" = "false" ] \
+  || fail "(d4) the board disabled its answer controls at load, before the API could appear"
+[ "$(printf '%s' "$late" | jq -r '.count')" = "1" ] \
+  || fail "(d4) an API that appears after load leaves decisions unanswerable"
+assert_contains "$(printf '%s' "$late" | jq -r '.prompt')" \
+  "decision_id: alpha-ship-decision-schema-shape" "(d4) the late-injected path queued the wrong payload"
+# Found in the same end-to-end run: a served board that had simply not been
+# injected yet displayed "answers cannot be sent from here" while its answers
+# were in fact sending. A served board must never claim to be a plain file.
+[ "$(printf '%s' "$late" | jq -r '.offlineShownAtLoad')" = "false" ] \
+  || fail "(d4) a served board wrongly tells the captain its answers cannot be sent"
+
+# A genuine plain file must say so rather than silently swallowing the answer.
+never=$(probe_decision "$FULL_HTML" "alpha-ship-decision-schema-shape" answer "Flat." never) \
+  || fail "(d4) the plain-file probe could not run"
+[ "$(printf '%s' "$never" | jq -r '.count')" = "0" ] \
+  || fail "(d4) a board with no review surface must not claim to have queued an answer"
+[ "$(printf '%s' "$never" | jq -r '.offlineShownAtLoad')" = "true" ] \
+  || fail "(d4) a board opened straight off disk does not say answers cannot be sent from there"
+[ "$(printf '%s' "$never" | jq -r '.offlineShown')" = "true" ] \
+  || fail "(d4) a failed send does not tell the captain the answer did not go anywhere"
+pass "(d4) a late-injected API still answers, and a plain file says so instead of swallowing it"
 
 # (d3) NEGATIVE CONTROL: the probe must be reading the real artifact -----------
 #
