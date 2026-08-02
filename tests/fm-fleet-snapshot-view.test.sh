@@ -779,8 +779,170 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# --- frozen output contract under concurrency -------------------------------
+#
+# Task rows are gathered concurrently (FM_SNAPSHOT_TASK_JOBS). The emitted bytes
+# are the stable contract fm-fleet-view.sh, fm-bearings-snapshot.sh, and
+# fm-fleet-board.sh all project over, so the concurrent path must reproduce the
+# serial path exactly - not merely equivalent JSON, the same bytes. Comparing
+# against JOBS=1 keeps this checkable forever without a golden file to rot.
+
+# A fleet wide enough to refill pool slots, with status streams that carry the
+# blank, whitespace-only, and very long lines the whole-stream fold must handle.
+write_concurrency_fixture() {  # <home> <mate-home>
+  local home=$1 mate=$2 i long
+  long=$(awk 'BEGIN{s="";for(i=0;i<40;i++)s=s "verified head 15736c75 and push_generation 3 unchanged; ";print s}')
+  mkdir -p "$home/projects/wt"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] row-01 - First row (repo: alpha) (kind: ship) (since 2026-07-07)
+- [ ] row-02 - Second row (repo: alpha) (kind: scout) (since 2026-07-07)
+
+## Queued
+- [ ] row-09 - Queued row blocked-by: row-01 - needs the first (repo: alpha) (kind: ship)
+
+## Done
+- [x] row-10 - Landed https://github.com/kunchenguid/firstmate/pull/7 (repo: alpha) (kind: ship) (merged 2026-07-06)
+EOF
+  i=1
+  while [ "$i" -le 9 ]; do
+    fm_write_meta "$home/state/row-0$i.meta" \
+      "window=firstmate:fm-row-0$i" \
+      "worktree=$home/projects/wt" \
+      "project=alpha" "harness=codex" "kind=ship" "mode=ship" "yolo=off"
+    {
+      printf 'working: started\n'
+      printf 'needs-decision [key=k%s]: %s\n' "$i" "$long"
+      printf '\n'
+      printf '\t  \t\n'
+      printf '     \n'
+      printf 'working: resumed after the gate\n'
+      printf 'blocked [key=b%s]: %s\n' "$i" "$long"
+    } > "$home/state/row-0$i.status"
+    i=$((i + 1))
+  done
+  # A secondmate row so the cross-home aggregation runs under concurrency too.
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$mate/bin"
+  printf 'mate-one\n' > "$mate/.fm-secondmate-home"
+  printf '# secondmate home\n' > "$mate/AGENTS.md"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] mate-ship - Mate ship (repo: alpha) (kind: ship) (since 2026-07-20)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$mate/projects/wt"
+  fm_write_meta "$mate/state/mate-ship.meta" \
+    "window=firstmate:fm-mate-ship" \
+    "worktree=$mate/projects/wt" \
+    "project=alpha" "harness=codex" "kind=ship" "mode=ship"
+  printf 'working: under way\n' > "$mate/state/mate-ship.status"
+  cat > "$home/data/secondmates.md" <<EOF
+# Secondmates
+
+- mate-one - owns alpha (home: $mate; scope: alpha work; projects: alpha; added 2026-07-01)
+EOF
+  fm_write_meta "$home/state/mate-one.meta" \
+    "window=firstmate:fm-mate-one" \
+    "worktree=$mate" "project=$mate" \
+    "harness=codex" "kind=secondmate" "mode=secondmate" \
+    "home=$mate" "projects=alpha"
+  printf 'working: watching scope\n' > "$home/state/mate-one.status"
+}
+
+# Concurrency must not reorder, interleave, or drop a single byte. Pinning the
+# observation clock removes the only legitimately volatile field, so this
+# asserts raw bytes with no normalization to mask a real difference.
+test_concurrent_rows_match_serial_bytes() {
+  local home mate fakebin serial jobs mode out
+  home=$(make_home concurrency)
+  # The secondmate home must sit outside the active home, so it cannot be a
+  # make_home sibling under the same parent as $home's own subdirectories.
+  mate=$TMP_ROOT/mates/concurrency-mate
+  mkdir -p "$mate"
+  write_concurrency_fixture "$home" "$mate"
+  fakebin=$(make_fakebin "$home")
+  for mode in --json --secondmate-home-summary; do
+    serial=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+      FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1785672000 \
+      FM_SNAPSHOT_TASK_JOBS=1 "$SNAPSHOT" "$mode") \
+      || fail "serial snapshot failed for $mode"
+    for jobs in 2 3 8 16; do
+      out=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+        FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1785672000 \
+        FM_SNAPSHOT_TASK_JOBS="$jobs" "$SNAPSHOT" "$mode") \
+        || fail "concurrent snapshot failed for $mode at JOBS=$jobs"
+      [ "$out" = "$serial" ] \
+        || fail "$mode at JOBS=$jobs diverged from the serial bytes: $(
+             diff <(printf '%s' "$serial") <(printf '%s' "$out") | head -5)"
+    done
+  done
+  pass "concurrent task rows reproduce the serial output bytes for both modes"
+}
+
+# The whole-stream fold skips blank and whitespace-only lines. That predicate is
+# load-bearing for the emitted decision set, and its implementation is
+# performance-sensitive, so pin the behavior through the snapshot's own output.
+test_status_fold_skips_blank_and_whitespace_lines() {
+  local home fakebin out
+  home=$(make_home blank-lines)
+  mkdir -p "$home/projects/wt"
+  # Parked, like test_parked_scout_decision_stays_pending: the lifecycle clear
+  # must not fire, so the emitted set reflects the fold alone.
+  fm_write_meta "$home/state/blank-task.meta" \
+    "window=firstmate:fm-blank-task" \
+    "worktree=$home/projects/wt" \
+    "project=alpha" "harness=claude" "kind=scout" "mode=scout"
+  record_claude_idle "$home/state" blank-task
+  {
+    printf '\n'
+    printf '   \n'
+    printf 'needs-decision [key=kept]: choose A or B\n'
+    printf '\t\t\n'
+    printf '\n'
+    printf ' \t \n'
+    printf 'blocked [key=also-kept]: waiting on infra\n'
+    printf '   \n'
+  } > "$home/state/blank-task.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "blank-task")
+    | ([.hints.open_decisions[].key] == ["kept","also-kept"])
+      and .hints.pending_decision == true
+      and .hints.blocked_event == true
+  ' >/dev/null \
+    || fail "blank and whitespace-only status lines changed the open-decision set: $out"
+  pass "blank and whitespace-only status lines are skipped by the decision fold"
+}
+
+# The concurrency bound joins the existing FM_SNAPSHOT_* bounds, so it refuses
+# an unusable value instead of silently falling back. An EMPTY value is not
+# unusable: like every other bound here it means "take the default".
+test_invalid_task_jobs_refused() {
+  local home out rc
+  home=$(make_home bad-jobs)
+  out=$(FM_HOME="$home" FM_SNAPSHOT_TASK_JOBS='' "$SNAPSHOT" --json 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "an empty FM_SNAPSHOT_TASK_JOBS should take the default, got $rc: $out"
+  for bad in 0 abc -2 3.5; do
+    out=$(FM_HOME="$home" FM_SNAPSHOT_TASK_JOBS="$bad" "$SNAPSHOT" --json 2>&1)
+    rc=$?
+    [ "$rc" -eq 2 ] \
+      || fail "FM_SNAPSHOT_TASK_JOBS='$bad' should exit 2, got $rc: $out"
+    assert_contains "$out" "FM_SNAPSHOT_TASK_JOBS must be a positive integer" \
+      "invalid FM_SNAPSHOT_TASK_JOBS='$bad' should name the bound"
+  done
+  pass "an unusable task-concurrency bound is refused rather than defaulted"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_concurrent_rows_match_serial_bytes
+test_status_fold_skips_blank_and_whitespace_lines
+test_invalid_task_jobs_refused
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
