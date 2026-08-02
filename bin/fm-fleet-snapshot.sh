@@ -621,16 +621,26 @@ task_row_json() {  # <meta-file>
 #
 # Concurrency is worth it because a row's cost is dominated by the crew-state
 # read, which shells out to the validation CLI and git per task.
+#
+# Concurrency is an optimization, never a requirement: it needs scratch space,
+# and this command backs fleet-view and bearings, which must still report when
+# scratch space is unavailable. So the serial path stays the fallback rather
+# than the failure - it emits the same bytes and needs nothing but jq.
 task_json_lines() {
-  local meta idx=0 rowdir rc=0 live
-  rowdir=$(mktemp -d "${TMPDIR:-/tmp}/fm-snapshot-rows.XXXXXX") || return 1
+  local meta idx=0 rowdir='' rc=0 live
+  if [ "$FM_SNAPSHOT_TASK_JOBS" -gt 1 ]; then
+    rowdir=$(mktemp -d "${TMPDIR:-/tmp}/fm-snapshot-rows.XXXXXX" 2>/dev/null) || rowdir=''
+  fi
+  if [ -z "$rowdir" ]; then
+    for meta in "$STATE"/*.meta; do
+      [ -e "$meta" ] || continue
+      task_row_json "$meta"
+    done | jq -s 'sort_by(.id)'
+    return $?
+  fi
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     idx=$((idx + 1))
-    if [ "$FM_SNAPSHOT_TASK_JOBS" -le 1 ]; then
-      task_row_json "$meta" > "$rowdir/$(printf '%06d' "$idx")"
-      continue
-    fi
     # Hold the slot count at the cap. A batch-and-wait barrier would idle every
     # finished worker until the slowest row in its batch landed; refilling one
     # slot at a time keeps all of them busy on an uneven fleet.
@@ -642,15 +652,15 @@ task_json_lines() {
     task_row_json "$meta" > "$rowdir/$(printf '%06d' "$idx")" &
   done
   wait
-  # Empty fleet: same filter on the same empty stream the serial loop fed it.
   if [ "$idx" -eq 0 ]; then
-    rm -rf "$rowdir"
+    # Empty fleet: same filter on the same empty stream the serial loop feeds it.
     jq -s 'sort_by(.id)' < /dev/null
-    return $?
+    rc=$?
+  else
+    cat "$rowdir"/* | jq -s 'sort_by(.id)'
+    rc=$?
   fi
-  cat "$rowdir"/* | jq -s 'sort_by(.id)'
-  rc=$?
-  rm -rf "$rowdir"
+  rm -rf "$rowdir" 2>/dev/null
   return "$rc"
 }
 

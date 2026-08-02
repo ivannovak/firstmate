@@ -965,6 +965,46 @@ $(head -30 "$TMP_ROOT/shape.diff")"
   pass "fm-fleet-snapshot.v1 key-path contract is unchanged"
 }
 
+# Concurrency needs scratch space, and this command backs both fleet-view and
+# bearings. Losing scratch space must cost speed, not the report: the serial
+# path emits the same bytes and needs no temp dir, so it is the fallback.
+test_snapshot_degrades_to_serial_without_scratch_space() {
+  local home mate fakebin toolbin cmd path with without rc
+  home=$(make_home no-scratch)
+  mate=$TMP_ROOT/mates/no-scratch-mate
+  mkdir -p "$mate"
+  write_concurrency_fixture "$home" "$mate"
+  fakebin=$(make_fakebin "$home")
+  toolbin="$home/toolbin"
+  mkdir -p "$toolbin"
+  # Everything the snapshot uses EXCEPT mktemp, so the only variable is scratch
+  # space rather than a generally crippled PATH.
+  for cmd in bash dirname basename jq date sed git grep tail cut tr head sort \
+             wc perl sleep cat find awk stat uname rm timeout; do
+    path=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$path" in /*) ln -sf "$path" "$toolbin/$cmd" ;; esac
+  done
+  [ -e "$toolbin/mktemp" ] && fail "fixture PATH must not provide mktemp"
+  # Control: the same PATH plus mktemp must work, so a failure below is about
+  # scratch space and not about a tool this fixture forgot.
+  path=$(command -v mktemp 2>/dev/null) || fail "mktemp missing from the test host"
+  ln -sf "$path" "$toolbin/mktemp"
+  with=$(PATH="$fakebin:$toolbin" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1785672000 \
+    "$SNAPSHOT" --json) \
+    || fail "control run with scratch space failed"
+  rm -f "$toolbin/mktemp"
+  without=$(PATH="$fakebin:$toolbin" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1785672000 \
+    "$SNAPSHOT" --json)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "snapshot must still report without scratch space, got exit $rc"
+  [ "$without" = "$with" ] \
+    || fail "the no-scratch fallback changed the emitted bytes: $(
+         diff <(printf '%s' "$with") <(printf '%s' "$without") | head -5)"
+  pass "the snapshot falls back to serial rows when scratch space is unavailable"
+}
+
 test_invalid_task_jobs_refused() {
   local home out rc
   home=$(make_home bad-jobs)
@@ -987,6 +1027,7 @@ test_fixture_snapshot_json
 test_concurrent_rows_match_serial_bytes
 test_blank_status_lines_never_become_decisions
 test_json_contract_shape_is_frozen
+test_snapshot_degrades_to_serial_without_scratch_space
 test_invalid_task_jobs_refused
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
