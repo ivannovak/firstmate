@@ -245,7 +245,7 @@ def empty_note($text): "<p class='rounded-box bg-base-100 p-4 text-sm opacity-60
 # --- Captain's Call -------------------------------------------------------
 "<section aria-label=\"Captain's Call\">",
 "<div class='mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1 border-l-4 border-error pl-4'>",
-"<h2 class='text-3xl font-bold tracking-tight'>Captain&#39;s Call</h2>",
+"<h2 class='text-3xl font-bold tracking-tight'>Captain's Call</h2>",
 "<span class='badge badge-error'>\($decisions | length)</span>",
 "<p class='text-sm opacity-70'>answer inline; nothing else on this board costs you anything</p>",
 "</div>",
@@ -385,8 +385,11 @@ section_head("Recently Landed"; ($landed | length); "done; no action"),
    "<ul class='space-y-2'>",
    ($candidate_prs | to_entries[] | .key as $i | .value |
      ("<li data-fm-item='\(itemkey("candidate_prs"; $i) | h)' class='rounded-box border border-base-content/10 bg-base-100 p-3 text-sm'>",
+      # Identity is the repo plus the task it belongs to, never a bare "#num":
+      # every pull request on this board reads as its full https URL below.
       "<div class='flex flex-wrap items-center gap-2'>",
-      "<span class='font-medium'>\(.repo | h) #\(.num | h)</span>",
+      "<span class='font-medium'>\(.repo | h)</span>",
+      (if (.task | blank) then empty else "<span class='badge badge-ghost badge-sm'>\(.task | h)</span>" end),
       "<span class='badge badge-sm \(if .checks == "failing" then "badge-error" elif .checks == "passing" then "badge-success" else "badge-neutral" end)'>checks \(.checks | h)</span>",
       "<span class='badge badge-ghost badge-sm'>review \(.review | h)</span>",
       "</div>",

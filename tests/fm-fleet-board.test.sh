@@ -14,9 +14,12 @@
 #   (a) every item in the projection renders, keyed <surface>:<id|index>
 #   (b) NEGATIVE CONTROL: a dropped item makes that same assertion fail non-zero
 #   (c) omitted[] is disclosed on the board, surface text and all
-#   (d) every open decision is answerable inline and queues an identifying prompt
+#   (d1) answering a decision RUNS the board's script and queues one identifying
+#        payload; (d2) an unsubmitted answer queues nothing and Defer is distinct;
+#        (d3) NEGATIVE CONTROL: the probe goes red on a tampered artifact
 #   (e) the artifact is self-contained: no local/relative asset references
-#   (f) PRs render as full https URLs, never a bare #number
+#   (f) PRs render as full https URLs, never a bare #number, on a scan whose
+#       positive control is checked before the scan is trusted
 #   (g) the board never writes fleet state (data/, state/, backlog untouched)
 #   (h) both light and dark themes are present and driven by the viewer
 #   (i) lavish-axi is invoked by default and skipped under --no-open
@@ -175,22 +178,178 @@ assert_contains "$board" "bounded view" "(c) the board does not warn that it is 
 pass "(c) omitted surfaces are visibly disclosed"
 
 # --- (d) decisions are answerable inline and identify themselves -------------
-assert_contains "$board" "data-decision-id='alpha-ship-decision-schema-shape'" \
-  "(d) a main-home decision has no inline answer form"
-assert_contains "$board" "data-decision-key='zeta-decision-retention'" \
-  "(d) a secondmate decision does not carry its own decision key"
-assert_contains "$board" "data-decision-owner='gamma-mate'" \
-  "(d) a decision does not carry its owning home"
-assert_contains "$board" "FLEET BOARD DECISION" "(d) the queued prompt has no identifying header"
-assert_contains "$board" "'decision_id: '" "(d) the queued prompt does not name the decision id"
-assert_contains "$board" "'decision_key: '" "(d) the queued prompt does not name the decision key"
-assert_contains "$board" "'answer: '" "(d) the queued prompt does not carry the answer"
-assert_contains "$board" "window.lavish.queuePrompt" "(d) answers are never queued back to the agent"
-assert_contains "$board" "queueKey" "(d) re-answering does not replace the prior unsent answer"
-# Reversible until submitted: no queuePrompt on a per-keystroke or change handler.
-assert_not_contains "$board" "addEventListener('change'" \
-  "(d) a change handler must not queue a prompt before the captain submits"
-pass "(d) every open decision is answerable inline with an identifying payload"
+#
+# EXECUTED, not read. Asserting that the artifact CONTAINS the string
+# "'decision_id: '" would pass just as happily on a script that never runs, which
+# is the inert-control failure this repo forbids. So the probe below runs the
+# board's OWN inline script over a minimal DOM, dispatches a real submit, and
+# reports the payload the board's real code path actually handed to Lavish.
+#
+# Every decision form is read out of the rendered artifact, so the probe cannot
+# pass by echoing constants the test itself supplied - case (d3) proves that by
+# stripping an attribute from the artifact and requiring the probe to go red.
+
+probe_decision() {  # <html> <decision-id> <intent> <typed-answer>; emits JSON
+  BOARD_HTML=$1 WANT_ID=$2 INTENT=$3 ANSWER=$4 node --input-type=module <<'EOF'
+import { readFileSync } from "node:fs";
+
+const html = readFileSync(process.env.BOARD_HTML, "utf8");
+const wantId = process.env.WANT_ID;
+const intent = process.env.INTENT || "answer";
+const typed = process.env.ANSWER ?? "";
+
+const decode = (s) =>
+  s.replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+   .replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+   .replace(/&amp;/g, "&");
+
+// Inline scripts only. A src= script would break the self-contained contract and
+// is refused by case (e); here it simply is not something the probe can run.
+const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)]
+  .map((m) => m[1]);
+if (scripts.length === 0) {
+  console.error("probe: the artifact carries no inline script to run");
+  process.exit(3);
+}
+
+// The decision form comes out of the ARTIFACT, not out of this probe.
+const formTags = [...html.matchAll(/<form\b([^>]*\bdata-fm-decision-form\b[^>]*)>/g)];
+const parsed = formTags.map((m) => {
+  const a = {};
+  for (const at of m[1].matchAll(/([a-zA-Z][\w-]*)='([^']*)'/g)) a[at[1]] = decode(at[2]);
+  return a;
+});
+const found = parsed.find((a) => a["data-decision-id"] === wantId);
+if (!found) {
+  console.error(`probe: no inline decision form for ${wantId}`);
+  process.exit(4);
+}
+for (const need of ["data-decision-id", "data-decision-key", "data-decision-owner", "data-decision-summary"]) {
+  if (!found[need]) {
+    console.error(`probe: the decision form is missing ${need}`);
+    process.exit(5);
+  }
+}
+
+const node = (extra = {}) => Object.assign({
+  textContent: "", hidden: true, disabled: false, value: "", _attrs: {},
+  getAttribute(n) { return this._attrs[n] ?? null; },
+  setAttribute(n, v) { this._attrs[n] = v; },
+  addEventListener() {}, focus() {},
+  querySelector() { return null; }, querySelectorAll() { return []; },
+  closest() { return null; },
+}, extra);
+
+const answerBox = node({ value: typed });
+const queuedNote = node();
+const form = node({
+  _attrs: found,
+  querySelector(sel) {
+    if (sel === '[name="answer"]') return answerBox;
+    if (sel === "[data-fm-queued]") return queuedNote;
+    return null;
+  },
+});
+const deferButton = node({ closest: (sel) => (sel === "[data-fm-decision-form]" ? form : null) });
+
+const queued = [];
+const listeners = {};
+const documentShim = {
+  documentElement: node(),
+  getElementById: () => null,
+  querySelectorAll: () => [],
+  addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+};
+const windowShim = {
+  lavish: { queuePrompt: (prompt, opts) => queued.push({ prompt, opts }) },
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+};
+const localStorageShim = { getItem: () => null, setItem() {} };
+
+// Shadow the globals the board's script closes over, then let it install itself.
+new Function("document", "window", "localStorage", scripts.join("\n;\n"))(
+  documentShim, windowShim, localStorageShim,
+);
+
+const type = intent === "defer" ? "click" : "submit";
+const target = intent === "defer" ? deferButton : {
+  closest: (sel) => (sel === "[data-fm-decision-form]" ? form : null),
+};
+const event = {
+  target: { closest: (sel) => (sel === "[data-fm-defer]" ? (intent === "defer" ? deferButton : null) : target.closest(sel)) },
+  preventDefault() {},
+};
+for (const fn of listeners[type] ?? []) fn(event);
+
+const first = queued[0] ?? null;
+console.log(JSON.stringify({
+  count: queued.length,
+  prompt: first?.prompt ?? null,
+  opts: first?.opts ?? null,
+  noteHidden: queuedNote.hidden,
+  noteText: queuedNote.textContent,
+}));
+EOF
+}
+
+# (d1) a real submit queues one identifying payload -----------------------------
+d_answer='Nested. Keep the round-trip test.'
+probe=$(probe_decision "$FULL_HTML" "gamma-mate/zeta-decision-retention" answer "$d_answer") \
+  || fail "(d) the decision probe could not run the board's inline script"
+
+[ "$(printf '%s' "$probe" | jq -r '.count')" = "1" ] \
+  || fail "(d) one submit must queue exactly one prompt, got: $(printf '%s' "$probe" | jq -r '.count')"
+
+prompt=$(printf '%s' "$probe" | jq -r '.prompt')
+assert_contains "$prompt" "FLEET BOARD DECISION" "(d) the queued prompt has no identifying header"
+assert_contains "$prompt" "decision_id: gamma-mate/zeta-decision-retention" \
+  "(d) the queued prompt does not name the decision that was answered"
+assert_contains "$prompt" "decision_key: zeta-decision-retention" \
+  "(d) the queued prompt does not carry the key bin/fm-decision-hold.sh needs"
+assert_contains "$prompt" "owner: gamma-mate" "(d) the queued prompt does not name the owning home"
+assert_contains "$prompt" "answer: $d_answer" "(d) the queued prompt does not carry the captain's answer"
+
+assert_contains "$(printf '%s' "$probe" | jq -r '.opts.data.decision_id')" \
+  "gamma-mate/zeta-decision-retention" "(d) the structured payload does not identify the decision"
+assert_contains "$(printf '%s' "$probe" | jq -r '.opts.data.answer')" "$d_answer" \
+  "(d) the structured payload does not carry the answer"
+[ "$(printf '%s' "$probe" | jq -r '.opts.queueKey')" != "null" ] \
+  || fail "(d) without a queueKey, re-answering appends instead of replacing the unsent answer"
+# Queued state must be visible and distinct from merely typed state.
+[ "$(printf '%s' "$probe" | jq -r '.noteHidden')" = "false" ] \
+  || fail "(d) the board does not show the captain that the answer was queued"
+pass "(d1) answering a decision queues one payload naming the decision and the answer"
+
+# (d2) reversible until submitted, and Defer is a distinct answer ---------------
+empty_probe=$(probe_decision "$FULL_HTML" "alpha-ship-decision-schema-shape" answer "   ") \
+  || fail "(d) the empty-answer probe could not run"
+[ "$(printf '%s' "$empty_probe" | jq -r '.count')" = "0" ] \
+  || fail "(d) an empty answer must not be queued as the captain's decision"
+
+defer_probe=$(probe_decision "$FULL_HTML" "alpha-ship-decision-schema-shape" defer "") \
+  || fail "(d) the defer probe could not run"
+[ "$(printf '%s' "$defer_probe" | jq -r '.count')" = "1" ] \
+  || fail "(d) Defer must queue exactly one payload"
+assert_contains "$(printf '%s' "$defer_probe" | jq -r '.prompt')" \
+  "decision_id: alpha-ship-decision-schema-shape" "(d) a deferral does not say which decision was deferred"
+assert_contains "$(printf '%s' "$defer_probe" | jq -r '.opts.data.intent')" "defer" \
+  "(d) a deferral is indistinguishable from a substantive answer"
+pass "(d2) an unsubmitted answer is never queued, and Defer identifies itself"
+
+# (d3) NEGATIVE CONTROL: the probe must be reading the real artifact -----------
+#
+# Strip the decision key out of the rendered board. If the probe still reports a
+# complete payload it was echoing this test's own constants, and (d1) proved
+# nothing about the board.
+TAMPERED="$TMP_ROOT/tampered.html"
+sed "s/data-decision-key='zeta-decision-retention'//" "$FULL_HTML" > "$TAMPERED"
+assert_not_contains "$(cat "$TAMPERED")" "data-decision-key='zeta-decision-retention'" \
+  "(d3) the tamper did not actually remove the key"
+probe_decision "$TAMPERED" "gamma-mate/zeta-decision-retention" answer "anything" >/dev/null 2>&1
+tampered_rc=$?
+[ "$tampered_rc" -ne 0 ] \
+  || fail "(d3) the probe accepted a board with no decision key, so (d1) proves nothing"
+pass "(d3) the decision probe goes red when the artifact loses its decision key"
 
 # --- (e) self-contained ------------------------------------------------------
 # Every external reference must be an absolute https CDN URL; a relative src/href
@@ -201,12 +360,34 @@ assert_not_contains "$board" "fetch(" "(e) the board must not fetch at runtime"
 pass "(e) the artifact is self-contained"
 
 # --- (f) full PR URLs, never a bare #number ----------------------------------
+#
+# jq's @html escapes an apostrophe in fleet-supplied text to the numeric entity
+# &#39;, and fleet text is full of apostrophes, so a naive "#<digits>" scan goes
+# red on every escaped apostrophe - red for a reason that has nothing to do with
+# pull requests. Strip character references first, then scan. Like the coverage
+# assertion, this is only worth having if it can fail, so the same function is
+# run over a positive control before it is trusted on the real board.
+bare_pr_refs() {  # <html-text>; prints every bare #<number> reference found
+  printf '%s\n' "$1" \
+    | sed 's/&#[0-9]*;//g; s/&[A-Za-z][A-Za-z0-9]*;//g' \
+    | grep -oE '(^|[^/[:alnum:]])#[0-9]+' || true
+}
+
+# The instrument, before the measurement: it must see a real bare reference...
+positive=$(bare_pr_refs "<li><span>o/r #44</span></li>")
+assert_contains "$positive" "#44" "(f) the bare-reference scan cannot detect a bare #number at all"
+# ...and must not mistake an escaped apostrophe for one.
+entities=$(bare_pr_refs "<h2>Captain&#39;s Call</h2><p>Bill &amp; Ben&#8217;s</p>")
+[ -z "$entities" ] \
+  || fail "(f) the bare-reference scan mistakes an HTML entity for a PR reference:"$'\n'"$entities"
+
 assert_contains "$board" "https://github.com/o/r/pull/42" "(f) a recorded PR URL is not rendered in full"
 assert_contains "$board" "https://github.com/o/r/pull/41" "(f) a landed PR artifact is not rendered in full"
 assert_contains "$board" "https://github.com/o/r/pull/43" "(f) a gated item's PR URL is not rendered in full"
-bare=$(printf '%s\n' "$board" | grep -oE '(^|[^/[:alnum:]])#[0-9]+' || true)
+assert_contains "$board" "https://github.com/o/r/pull/44" "(f) an open PR's URL is not rendered in full"
+bare=$(bare_pr_refs "$board")
 [ -z "$bare" ] || fail "(f) the board renders a bare #number PR reference:"$'\n'"$bare"
-pass "(f) every PR renders as a full https URL"
+pass "(f) every PR renders as a full https URL, on a scan proven able to fail"
 
 # --- (g) the board never writes fleet state ----------------------------------
 HOME_DIR="$TMP_ROOT/home"
