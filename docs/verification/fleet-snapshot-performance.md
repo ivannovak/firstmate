@@ -82,18 +82,41 @@ Slots are refilled one at a time rather than in batches: a batch barrier idles e
 
 ## Reader cost, before and after
 
-Verified 2026-08-02, same fleet.
+Verified 2026-08-02, same fleet, best of three runs each, before and after
+measured back to back on an otherwise idle machine.
 
 ```
-                                before   after
-bin/fm-fleet-snapshot.sh --json  23.3s    3.0s
-bin/fm-fleet-view.sh             22.5s    3.1s
-bin/fm-bearings-snapshot.sh      21.5s    3.2s
+                                 before   after
+bin/fm-fleet-snapshot.sh --json  23.60s   3.34s
+bin/fm-fleet-view.sh             23.82s   3.60s
+bin/fm-bearings-snapshot.sh      24.07s   3.69s
 ```
 
 Both projections shell out to the snapshot, so they track it.
 
+Cost now sits where it cannot be removed without changing what is reported: the
+slowest single crew-state read bounds the concurrent phase, and the registered
+secondmate aggregation remains sequential at roughly 0.75s.
+
+## Scratch space is optional
+
+Concurrency needs a scratch directory, which the snapshot did not previously
+require.
+Taking that as a hard requirement would make this command fail where it used to
+work, and both `bin/fm-fleet-view.sh` and `bin/fm-bearings-snapshot.sh` depend
+on it reporting.
+When the scratch directory cannot be created, rows are produced serially
+instead, which needs nothing beyond jq.
+Verified 2026-08-02 by running the same fixture through a PATH containing every
+tool the snapshot uses except `mktemp`: exit 0, empty stderr, and output
+byte-identical to the same PATH with `mktemp` restored.
+
 ## Output contract
 
 The emitted bytes are unchanged.
+Verified 2026-08-02 against the pre-change script on a hermetic fixture with the
+observation clock pinned and no normalization (88918 bytes `--json`, 7305 bytes
+`--secondmate-home-summary`, both diffs empty), and on the live 12-task fleet
+(268556 and 28627 bytes, both diffs empty) with a reference-versus-reference run
+in the same window confirming the fleet did not drift during the comparison.
 `tests/fm-fleet-snapshot-view.test.sh` holds the durable guards: `test_concurrent_rows_match_serial_bytes` compares every concurrency level against `FM_SNAPSHOT_TASK_JOBS=1` for both `--json` and `--secondmate-home-summary`, and `test_json_contract_shape_is_frozen` pins the ordered key-path shape against `tests/golden/fm-fleet-snapshot-shape.txt`.
