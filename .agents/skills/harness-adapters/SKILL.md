@@ -109,7 +109,7 @@ Never replace an effort value supplied by either higher-precedence source.
 Use the fallback only when neither the captain nor applicable standing configuration specifies effort.
 Use `low` for well-understood work with an explicit bounded path and `xhigh` for ambiguous investigation or design.
 Choose intermediate levels proportionally as complexity, uncertainty, blast radius, or open-ended reasoning increases.
-When a verified adapter lacks `xhigh`, cap the choice at its highest supported non-`max` level rather than omitting the intended effort silently.
+When a verified adapter lacks `xhigh`, cap the choice at its highest supported non-`max` level rather than requesting an effort `fm-spawn` will refuse.
 Never select `max` from this fallback; use it only when the captain has explicitly expressed that per-task or standing preference.
 
 The supported launch-profile flags below are verified locally; each row records its evidence.
@@ -302,7 +302,7 @@ When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` lau
 
 Grok Build TUI (`grok`), a Claude-Code-compatible CLI from xAI.
 Launch with a positional prompt: `grok --always-approve "$(cat <brief>)"`.
-For Grok's supported reasoning-effort values and omission behavior, see the [launch-profile-axes table](#launch-profile-axes).
+For Grok's supported reasoning-effort values and refusal behavior, see the [launch-profile-axes table](#launch-profile-axes).
 
 | Fact | Value |
 |---|---|
