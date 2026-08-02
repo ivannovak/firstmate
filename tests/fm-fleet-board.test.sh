@@ -46,9 +46,10 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 command -v jq >/dev/null 2>&1 || { printf 'ok - fm-fleet-board: skipped (jq not found)\n'; exit 0; }
 
 # A hermetic fm-bearings.v1 fixture. It carries every array surface the renderer
-# knows about, including candidate_prs (whose rows have no `id`, exercising the
-# index-keyed fallback) and a secondmate row, so coverage is proved across all of
-# them rather than only the ones a given live fleet happens to have.
+# knows about, including candidate_prs (whose rows have no `id`) and a report row
+# whose id is the "-" placeholder - both exercising the renderer's index-keyed
+# fallback - and a secondmate row, so coverage is proved across all of them
+# rather than only the ones a given live fleet happens to have.
 FIXTURE="$TMP_ROOT/bearings.json"
 cat > "$FIXTURE" <<'JSON'
 {
@@ -87,7 +88,8 @@ cat > "$FIXTURE" <<'JSON'
      "reason": "code freeze until 2026-08-10", "owner": "gamma-mate"}
   ],
   "reports": [
-    {"id": "beta-scout", "path": "/tmp/fm/data/beta-scout/report.md"}
+    {"id": "beta-scout", "path": "/tmp/fm/data/beta-scout/report.md"},
+    {"id": "-", "path": "/tmp/fm/data/unowned/report.md"}
   ],
   "recorded_prs": [
     {"id": "alpha-ship", "url": "https://github.com/o/r/pull/42"},
@@ -122,7 +124,7 @@ board_keys_from_json() {  # <bearings-json>
     | select((.value | type) == "array")
     | .key as $surface
     | (.value | to_entries[])
-    | "\($surface):\(if (.value.id // "") == "" then (.key | tostring) else .value.id end)"
+    | "\($surface):\(.value.id as $id | if ($id == null or $id == "" or $id == "-") then (.key | tostring) else $id end)"
   ' "$1"
 }
 
@@ -193,6 +195,10 @@ pass "(c) omitted surfaces are visibly disclosed"
 # pass by echoing constants the test itself supplied - case (d3) proves that by
 # stripping an attribute from the artifact and requiring the probe to go red.
 
+if ! command -v node >/dev/null 2>&1; then
+  printf 'ok - fm-fleet-board: (d) decision cases skipped (node not found)\n'
+else
+
 probe_decision() {  # <html> <decision-id> <intent> <typed-answer> [timing]; emits JSON
   BOARD_HTML=$1 WANT_ID=$2 INTENT=$3 ANSWER=$4 LAVISH_TIMING=${5:-early} \
     node --input-type=module <<'EOF'
@@ -205,7 +211,8 @@ const typed = process.env.ANSWER ?? "";
 
 const decode = (s) =>
   s.replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
-   .replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+   .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+   .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
    .replace(/&amp;/g, "&");
 
 // Inline scripts only. A src= script would break the self-contained contract and
@@ -416,6 +423,8 @@ tampered_rc=$?
   || fail "(d3) the probe accepted a board with no decision key, so (d1) proves nothing"
 pass "(d3) the decision probe goes red when the artifact loses its decision key"
 
+fi
+
 # --- (e) self-contained ------------------------------------------------------
 # Every external reference must be an absolute https CDN URL; a relative src/href
 # would break criterion 5 (opening the file directly with no server running).
@@ -426,10 +435,11 @@ pass "(e) the artifact is self-contained"
 
 # --- (f) full PR URLs, never a bare #number ----------------------------------
 #
-# jq's @html escapes an apostrophe in fleet-supplied text to the numeric entity
-# &#39;, and fleet text is full of apostrophes, so a naive "#<digits>" scan goes
-# red on every escaped apostrophe - red for a reason that has nothing to do with
-# pull requests. Strip character references first, then scan. Like the coverage
+# jq's @html escapes an apostrophe in fleet-supplied text to a character
+# reference - the numeric entity &#39; on older jq, the named &apos; on jq
+# 1.7+ - and fleet text is full of apostrophes, so a naive "#<digits>" scan goes
+# red on every numerically escaped apostrophe - red for a reason that has
+# nothing to do with pull requests. Strip character references first, then scan. Like the coverage
 # assertion, this is only worth having if it can fail, so the same function is
 # run over a positive control before it is trusted on the real board.
 #
