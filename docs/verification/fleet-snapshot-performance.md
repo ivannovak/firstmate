@@ -119,4 +119,4 @@ observation clock pinned and no normalization (88918 bytes `--json`, 7305 bytes
 `--secondmate-home-summary`, both diffs empty), and on the live 12-task fleet
 (268556 and 28627 bytes, both diffs empty) with a reference-versus-reference run
 in the same window confirming the fleet did not drift during the comparison.
-`tests/fm-fleet-snapshot-view.test.sh` holds the durable guards: `test_concurrent_rows_match_serial_bytes` compares every concurrency level against `FM_SNAPSHOT_TASK_JOBS=1` for both `--json` and `--secondmate-home-summary`, and `test_json_contract_shape_is_frozen` pins the ordered key-path shape against `tests/golden/fm-fleet-snapshot-shape.txt`.
+`tests/fm-fleet-snapshot-view.test.sh` holds the durable guards: `test_concurrent_rows_match_serial_bytes` compares concurrency levels 2, 3, 8, and 16 against `FM_SNAPSHOT_TASK_JOBS=1` for both `--json` and `--secondmate-home-summary`, and `test_json_contract_shape_is_frozen` pins the ordered key-path shape against `tests/golden/fm-fleet-snapshot-shape.json`.
