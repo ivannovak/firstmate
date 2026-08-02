@@ -566,6 +566,27 @@ test_opencode_refuses_undeliverable_effort_axis() {
   pass "opencode refuses an effort its interactive launch cannot deliver"
 }
 
+test_raw_launch_refuses_undeliverable_effort() {
+  local rec id out status
+  id=profile-raw-effort-z7b
+  rec=$(make_spawn_case profile-raw-effort codex "$id")
+  read_case_record "$rec"
+
+  # A raw launch command (unverified-adapter escape hatch) has no __EFFORTFLAG__
+  # placeholder, so even a catalog-supported effort has nowhere to land.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    'codex --dangerously-bypass-approvals-and-sandbox go' --model gpt-5.6-sol --effort max)
+  status=$?
+  expect_code 1 "$status" "raw launch spawn with a requested effort should refuse"
+  assert_contains "$out" "requested effort 'max' cannot be delivered" \
+    "raw-launch refusal did not name the undeliverable request"
+  assert_contains "$out" "no __EFFORTFLAG__ placeholder" \
+    "raw-launch refusal did not explain the missing placeholder"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw-launch refusal wrote misleading task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw-launch refusal typed a launch command"
+  pass "a raw launch command refuses a requested effort it has no placeholder to receive"
+}
+
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-pi-z8
@@ -771,6 +792,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_refuses_invalid_max_reasoning_effort
 test_grok_refuses_invalid_xhigh_reasoning_effort
 test_opencode_refuses_undeliverable_effort_axis
+test_raw_launch_refuses_undeliverable_effort
 test_pi_threads_model_and_max_effort
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

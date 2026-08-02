@@ -606,6 +606,32 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# A hermetic Codex model catalog, mirroring fm-spawn-dispatch-profile.test.sh's
+# write_codex_catalog: fm-spawn's codex effort preflight reads
+# ${CODEX_HOME:-$HOME/.codex}/models_cache.json, and without a pinned CODEX_HOME
+# every codex+effort spawn here would depend on the invoking machine's live
+# Codex state.
+write_codex_catalog() {
+  local codex_home=$1
+  mkdir -p "$codex_home"
+  cat > "$codex_home/models_cache.json" <<'JSON'
+{
+  "client_version": "test",
+  "models": [
+    {
+      "slug": "gpt-5.5",
+      "supported_reasoning_levels": [
+        {"effort": "low"},
+        {"effort": "medium"},
+        {"effort": "high"},
+        {"effort": "xhigh"}
+      ]
+    }
+  ]
+}
+JSON
+}
+
 # spawn_secondmate_capture <world> <id> <home> <launchlog> [extra fm-spawn.sh args...]
 # Same shape as spawn_secondmate but captures the launch command into <launchlog>
 # and does not discard stderr, so callers can assert on both.
@@ -614,12 +640,14 @@ spawn_secondmate_capture() {
   shift 4
   mkdir -p "$world/home/state" "$world/home/data"
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
+  write_codex_catalog "$world/codex-home"
   : > "$launchlog"
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    CODEX_HOME="$world/codex-home" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
 }
 

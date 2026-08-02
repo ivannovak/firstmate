@@ -1204,6 +1204,16 @@ effort_flag_for_harness() {
 # without leaving side effects or a durable record that falsely claims it launched.
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+if [ -n "$EFFORTFLAG" ]; then
+  case "$LAUNCH" in
+    *__EFFORTFLAG__*) ;;
+    *)
+      refuse_undeliverable_effort "$HARNESS" "$EFFORT" \
+        "this launch command has no __EFFORTFLAG__ placeholder to receive it"
+      exit 1
+      ;;
+  esac
+fi
 
 case "$LAUNCH" in
   *__MUSEBIN__*)

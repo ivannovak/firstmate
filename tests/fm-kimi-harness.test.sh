@@ -186,7 +186,7 @@ test_kimi_launch_then_send_is_verified() {
   read_spawn_record "$rec"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
-    --model kimi-code/k3 --effort high)
+    --model kimi-code/k3)
   rc=$?
   expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
@@ -194,7 +194,6 @@ test_kimi_launch_then_send_is_verified() {
   launch=$(cat "$CASE_DIR/launch.log")
   [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
-  assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
 
@@ -204,7 +203,7 @@ test_kimi_launch_then_send_is_verified() {
     || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=kimi-code/k3' "$meta" "kimi meta lost the requested model"
-  assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
+  assert_grep 'effort=default' "$meta" "kimi meta invented an effort no launch received"
   assert_grep "tasktmp=$task_tmp" "$meta" "kimi meta did not record its task temp root"
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
@@ -214,6 +213,24 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+test_kimi_refuses_undeliverable_effort_axis() {
+  local id rec out rc
+  id="kimi-effort-refusal-z2-$$"
+  rec=$(make_spawn_case effort-refusal "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model kimi-code/k3 --effort high)
+  rc=$?
+  expect_code 1 "$rc" "kimi spawn with an undeliverable effort should refuse"
+  assert_contains "$out" "requested effort 'high' cannot be delivered" \
+    "kimi refusal did not name the undeliverable request"
+  assert_contains "$out" "it has no reasoning-effort flag" \
+    "kimi refusal did not explain why the axis is undeliverable"
+  assert_absent "$HOME_DIR/state/$id.meta" "kimi refusal wrote misleading task metadata"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "kimi refusal typed a launch command"
+  pass "kimi refuses an effort its launch cannot deliver"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -662,6 +679,7 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_refuses_undeliverable_effort_axis
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token
