@@ -200,6 +200,16 @@ def empty_note($text): "<p class='rounded-box bg-base-100 p-4 text-sm opacity-60
 "  :where(.grid, .flex) > * { min-width: 0; }",
 "  :where(p, h1, h2, h3, h4, h5, h6, li, dd, dt, blockquote, figcaption, span, a, code, .badge) { overflow-wrap: anywhere; }",
 "  :where(img, svg, video, canvas, iframe) { max-width: 100%; height: auto; }",
+# The board is deliberately uncapped in width: the captain reads it at a glance,
+# so extra width must buy MORE cards, not wider ones. These are plain CSS
+# auto-fill grids, NOT Tailwind arbitrary-variant breakpoints - the Tailwind
+# browser runtime generates no rule for those, verified in a browser, so the
+# column count silently stayed at 2 on a 2600px viewport while cards just got
+# wider. auto-fill also scales continuously instead of stepping at fixed
+# breakpoints, and the min() floor keeps one full-width column on a narrow
+# screen so nothing ever scrolls sideways.
+"  .fm-grid-cards { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 30rem), 1fr)); }",
+"  .fm-grid-rows { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 26rem), 1fr)); }",
 "</style>",
 "<script>",
 "(function () {",
@@ -214,7 +224,7 @@ def empty_note($text): "<p class='rounded-box bg-base-100 p-4 text-sm opacity-60
 "<body class='bg-base-200 text-base-content'>",
 
 "<header class='sticky top-0 z-30 border-b border-base-content/10 bg-base-100/95 backdrop-blur'>",
-"<div class='mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 lg:px-8'>",
+"<div class='flex w-full flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 lg:px-8'>",
 "<h1 class='text-lg font-semibold tracking-tight'>Fleet Board</h1>",
 "<span class='badge badge-soft badge-primary'>\(.home | h)</span>",
 "<span class='text-xs opacity-60'>as of \(.generated | h)</span>",
@@ -225,7 +235,7 @@ def empty_note($text): "<p class='rounded-box bg-base-100 p-4 text-sm opacity-60
 "</div>",
 "</header>",
 
-"<main class='mx-auto max-w-7xl space-y-10 px-4 py-6 lg:px-8 lg:py-10'>",
+"<main class='w-full space-y-10 px-4 py-6 lg:px-8 lg:py-10'>",
 
 # --- the five-second read -------------------------------------------------
 "<section aria-label='Fleet at a glance' class='grid gap-4 sm:grid-cols-2 xl:grid-cols-4'>",
@@ -266,7 +276,7 @@ def empty_note($text): "<p class='rounded-box bg-base-100 p-4 text-sm opacity-60
 "<p class='text-sm opacity-70'>answer inline; nothing else on this board costs you anything</p>",
 "</div>",
 (if ($decisions | length) == 0 then empty_note("No open decisions. Nothing is waiting on you.") else
-  ("<div class='grid gap-4 xl:grid-cols-2'>",
+  ("<div class='fm-grid-cards'>",
    ($decisions | to_entries[] | .key as $i | .value |
      ("<article data-fm-item='\(itemkey("decisions_open"; $i) | h)' class='card border-l-4 border-error bg-base-100 shadow-sm'>",
       "<div class='card-body gap-3 p-5'>",
@@ -299,7 +309,7 @@ def empty_note($text): "<p class='rounded-box bg-base-100 p-4 text-sm opacity-60
 "<section aria-label='Under Way'>",
 section_head("Under Way"; ($in_flight | length); "moving without you"),
 (if ($in_flight | length) == 0 then empty_note("Nothing is under way.") else
-  ("<ul class='space-y-3'>",
+  ("<ul class='fm-grid-rows'>",
    ($in_flight | to_entries[] | .key as $i | .value |
      ("<li data-fm-item='\(itemkey("in_flight"; $i) | h)' class='rounded-box border border-base-content/10 bg-base-100 p-4'>",
       "<div class='flex flex-wrap items-center justify-between gap-2'>",
@@ -322,7 +332,7 @@ section_head("Under Way"; ($in_flight | length); "moving without you"),
 "<section aria-label='Charted Next'>",
 section_head("Charted Next"; ($gates | length); "queued or held, not on you"),
 (if ($gates | length) == 0 then empty_note("Nothing is queued.") else
-  ("<ul class='space-y-3'>",
+  ("<ul class='fm-grid-rows'>",
    ($gates | to_entries[] | .key as $i | .value |
      ("<li data-fm-item='\(itemkey("gates"; $i) | h)' class='rounded-box border border-base-content/10 bg-base-100 p-4'>",
       "<div class='flex flex-wrap items-center justify-between gap-2'>",
@@ -345,7 +355,7 @@ section_head("Charted Next"; ($gates | length); "queued or held, not on you"),
 "<section aria-label='Recently Landed'>",
 section_head("Recently Landed"; ($landed | length); "done; no action"),
 (if ($landed | length) == 0 then empty_note("Nothing landed recently.") else
-  ("<ul class='grid gap-3 lg:grid-cols-2'>",
+  ("<ul class='fm-grid-rows'>",
    ($landed | to_entries[] | .key as $i | .value |
      ("<li data-fm-item='\(itemkey("landed"; $i) | h)' class='rounded-box border border-success/30 bg-base-100 p-4'>",
       "<div class='flex flex-wrap items-start justify-between gap-2'>",
@@ -363,7 +373,7 @@ section_head("Recently Landed"; ($landed | length); "done; no action"),
 (if ($secondmates | length) == 0 then empty else
   ("<section aria-label='Secondmate homes'>",
    section_head("Second Mates"; ($secondmates | length); "their active work already appears under Under Way"),
-   "<ul class='grid gap-3 lg:grid-cols-2'>",
+   "<ul class='fm-grid-rows'>",
    ($secondmates | to_entries[] | .key as $i | .value |
      ("<li data-fm-item='\(itemkey("secondmates"; $i) | h)' class='rounded-box border border-base-content/10 bg-base-100 p-4'>",
       "<div class='flex flex-wrap items-center justify-between gap-2'>",

@@ -616,4 +616,41 @@ assert_contains "$rollup_board" "data-fm-item='in_flight:nu-done'" \
   "(l) the done row lost its coverage key"
 pass "(l) parked counts as stuck, done counts in neither headline, both still render"
 
+# --- (m) the board is not width-capped ---------------------------------------
+#
+# The captain's at-a-glance criterion: extra screen width must buy MORE cards,
+# not wider ones. Two things have to hold, and a browser check proved both are
+# easy to get wrong. First, no fixed max-width container may cap the board.
+# Second, the card grids must be the plain-CSS auto-fill grids: an earlier
+# attempt used Tailwind arbitrary variants (min-[1800px]:grid-cols-3), and a
+# real browser showed the runtime generated NO rule for them, so the column
+# count silently stayed at 2 on a 2600px viewport while the cards just got
+# wider - the exact opposite of the criterion, and invisible to any text
+# assertion that only checked the cap was gone.
+bare_caps=$(printf '%s\n' "$board" | grep -oE "max-w-[0-9]+xl|max-w-screen-[a-z]+" || true)
+[ -z "$bare_caps" ] \
+  || fail "(m) the board re-introduced a fixed width cap:"$'\n'"$bare_caps"
+# Assert the class is USED on an element, not merely defined. Matching the bare
+# token "fm-grid-cards" passes on the CSS rule alone, so this assertion stayed
+# green through a mutation that moved the decision grid back to the broken
+# Tailwind variants - an inert control, caught by watching it fail.
+assert_contains "$board" "class='fm-grid-cards'" \
+  "(m) the decision cards do not use the auto-fill card grid"
+assert_contains "$board" "class='fm-grid-rows'" \
+  "(m) the row lists do not use the auto-fill row grid"
+# No arbitrary-variant column utilities: the browser runtime compiles no rule
+# for them, so they look right in the source and do nothing on the page.
+assert_not_contains "$board" "min-[" \
+  "(m) a Tailwind arbitrary-variant breakpoint is back; the runtime generates no rule for it"
+assert_contains "$board" "repeat(auto-fill" "(m) the board defines no auto-fill grid, so width cannot add columns"
+# The min() floor is what keeps a single full-width column on a narrow screen;
+# without it the auto-fill track can exceed the viewport and scroll sideways.
+# Check EVERY track, not that some track has one: asserting the substring
+# "minmax(min(100%" stayed green when one of the two grids lost its floor,
+# because the other still had it - caught by watching that mutation pass.
+floorless=$(printf '%s\n' "$board" | grep -oE 'minmax\([^)]*rem' | grep -v 'min(' || true)
+[ -z "$floorless" ] \
+  || fail "(m) an auto-fill track has no narrow-screen floor, so it can scroll sideways:"$'\n'"$floorless"
+pass "(m) the board is uncapped and gains columns with width instead of widening cards"
+
 printf 'ok - fm-fleet-board: all cases passed\n'
