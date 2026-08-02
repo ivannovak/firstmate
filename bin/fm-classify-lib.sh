@@ -219,10 +219,12 @@ status_open_decisions() {  # <status-file>
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    # Skip blank and whitespace-only lines. Keep this as a case glob: the
-    # equivalent `${line//[[:space:]]/}` costs ~1.8s for a single 3KB status
-    # line on stock macOS bash 3.2, which made the fleet snapshot's whole-stream
-    # fold its dominant cost (docs/verification/fleet-snapshot-performance.md).
+    # Short-circuit blank and whitespace-only lines. This is a fast path, not a
+    # semantic rule: such a line parses to an empty verb and already matches no
+    # case arm below. Keep it a case glob - the equivalent
+    # `${line//[[:space:]]/}` costs ~1.8s for a single 3KB status line on stock
+    # macOS bash 3.2, which alone made this fold the fleet snapshot's dominant
+    # cost (docs/verification/fleet-snapshot-performance.md).
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line") || continue
@@ -281,7 +283,7 @@ _fm_status_open_activities_stream() {
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    # Blank-line skip: see status_open_decisions for why this stays a case glob.
+    # Blank-line fast path: see status_open_decisions for why this stays a case glob.
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line") || continue

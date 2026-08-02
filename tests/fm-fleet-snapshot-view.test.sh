@@ -796,7 +796,7 @@ write_concurrency_fixture() {  # <home> <mate-home>
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] row-01 - First row (repo: alpha) (kind: ship) (since 2026-07-07)
-- [ ] row-02 - Second row (repo: alpha) (kind: scout) (since 2026-07-07)
+- [ ] row-02 - Second row blocked-by: row-01 - waits on the first (repo: alpha) (kind: scout) (since 2026-07-07)
 
 ## Queued
 - [ ] row-09 - Queued row blocked-by: row-01 - needs the first (repo: alpha) (kind: ship)
@@ -882,10 +882,12 @@ test_concurrent_rows_match_serial_bytes() {
   pass "concurrent task rows reproduce the serial output bytes for both modes"
 }
 
-# The whole-stream fold skips blank and whitespace-only lines. That predicate is
-# load-bearing for the emitted decision set, and its implementation is
-# performance-sensitive, so pin the behavior through the snapshot's own output.
-test_status_fold_skips_blank_and_whitespace_lines() {
+# Blank and whitespace-only lines must never become decisions. The fold's own
+# blank-line branch is a fast path with no observable effect - a whitespace-only
+# line parses to an empty verb and matches no arm either way - so this pins the
+# emitted set, which is the part the contract actually promises, rather than the
+# short-circuit itself.
+test_blank_status_lines_never_become_decisions() {
   local home fakebin out
   home=$(make_home blank-lines)
   mkdir -p "$home/projects/wt"
@@ -915,12 +917,54 @@ test_status_fold_skips_blank_and_whitespace_lines() {
       and .hints.blocked_event == true
   ' >/dev/null \
     || fail "blank and whitespace-only status lines changed the open-decision set: $out"
-  pass "blank and whitespace-only status lines are skipped by the decision fold"
+  pass "blank and whitespace-only status lines never become decisions"
 }
 
 # The concurrency bound joins the existing FM_SNAPSHOT_* bounds, so it refuses
 # an unusable value instead of silently falling back. An EMPTY value is not
 # unusable: like every other bound here it means "take the default".
+# fm-fleet-view.sh, fm-bearings-snapshot.sh, and fm-fleet-board.sh all project
+# over this JSON, so field names, nesting, and ordering are the frozen part of
+# the contract. Pin the ordered key-path shape rather than a value golden:
+# values carry live git/endpoint text that legitimately differs per machine,
+# while the shape does not, so this catches an added, renamed, moved, or dropped
+# field without turning into a cross-platform flake.
+#
+# Regenerate deliberately, only when the contract is meant to change:
+#   FM_SNAPSHOT_SHAPE_REGEN=1 bash tests/fm-fleet-snapshot-view.test.sh
+snapshot_shape() {  # <json-file>
+  jq -r '[paths | map(if type == "number" then "#" else tostring end) | join(".")] | .[]' "$1" \
+    | awk '!seen[$0]++' \
+    | jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
+test_json_contract_shape_is_frozen() {
+  local home mate fakebin golden actual
+  home=$(make_home shape)
+  mate=$TMP_ROOT/mates/shape-mate
+  mkdir -p "$mate"
+  write_concurrency_fixture "$home" "$mate"
+  fakebin=$(make_fakebin "$home")
+  golden="$ROOT/tests/golden/fm-fleet-snapshot-shape.json"
+  PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1785672000 \
+    "$SNAPSHOT" --json > "$TMP_ROOT/shape-snapshot.json" \
+    || fail "snapshot failed while capturing the contract shape"
+  actual=$TMP_ROOT/shape-paths.json
+  snapshot_shape "$TMP_ROOT/shape-snapshot.json" > "$actual"
+  if [ -n "${FM_SNAPSHOT_SHAPE_REGEN:-}" ]; then
+    mkdir -p "$(dirname "$golden")"
+    cp "$actual" "$golden"
+    pass "regenerated the frozen fm-fleet-snapshot.v1 key-path shape"
+    return 0
+  fi
+  [ -f "$golden" ] || fail "missing contract shape golden: $golden"
+  diff -u "$golden" "$actual" > "$TMP_ROOT/shape.diff" 2>&1 \
+    || fail "fm-fleet-snapshot.v1 key-path contract changed:
+$(head -30 "$TMP_ROOT/shape.diff")"
+  pass "fm-fleet-snapshot.v1 key-path contract is unchanged"
+}
+
 test_invalid_task_jobs_refused() {
   local home out rc
   home=$(make_home bad-jobs)
@@ -941,7 +985,8 @@ test_invalid_task_jobs_refused() {
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_concurrent_rows_match_serial_bytes
-test_status_fold_skips_blank_and_whitespace_lines
+test_blank_status_lines_never_become_decisions
+test_json_contract_shape_is_frozen
 test_invalid_task_jobs_refused
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
