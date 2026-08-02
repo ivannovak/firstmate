@@ -638,6 +638,15 @@ task_json_lines() {
     done | jq -s 'sort_by(.id)'
     return $?
   fi
+  # This function's only call site runs it in a command-substitution subshell,
+  # so these traps are scoped to that subshell and cannot clobber outer
+  # handlers. Without them, run_timed's TERM-then-KILL of a timed-out child
+  # snapshot (or a user interrupt) would skip the cleanup below and leak one
+  # scratch dir per kill - and polling renderers re-run this on every refresh.
+  # The rm must run inside the signal traps: an EXIT trap fires after `exit`
+  # has already unwound this function's locals, so it cannot see $rowdir.
+  trap 'rm -rf "${rowdir:-}" 2>/dev/null; exit 143' TERM
+  trap 'rm -rf "${rowdir:-}" 2>/dev/null; exit 130' INT
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     idx=$((idx + 1))

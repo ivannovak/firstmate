@@ -980,7 +980,7 @@ test_snapshot_degrades_to_serial_without_scratch_space() {
   # Everything the snapshot uses EXCEPT mktemp, so the only variable is scratch
   # space rather than a generally crippled PATH.
   for cmd in bash dirname basename jq date sed git grep tail cut tr head sort \
-             wc perl sleep cat find awk stat uname rm timeout; do
+             wc perl sleep cat find awk stat uname rm timeout env ps; do
     path=$(command -v "$cmd" 2>/dev/null) || continue
     case "$path" in /*) ln -sf "$path" "$toolbin/$cmd" ;; esac
   done
@@ -993,12 +993,28 @@ test_snapshot_degrades_to_serial_without_scratch_space() {
     FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1785672000 \
     "$SNAPSHOT" --json) \
     || fail "control run with scratch space failed"
+  # The registered-home subtree carries its own scratch-space fallback, so the
+  # comparison is meaningful only if both runs actually read that home. A
+  # degraded record here means the fixture PATH lost a tool the nested snapshot
+  # needs, and the byte comparison below would agree on the failure either way.
+  printf '%s' "$with" | jq -e '
+    [.secondmate_current.records[].provenance.selected] == ["structured-home"]
+  ' >/dev/null \
+    || fail "control run degraded the registered home instead of reading it: $(
+         printf '%s' "$with" | jq -c \
+           '[.secondmate_current.records[] | {id, selected:.provenance.selected, reason:.current.reason}]')"
   rm -f "$toolbin/mktemp"
   without=$(PATH="$fakebin:$toolbin" FM_HOME="$home" \
     FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z FM_SNAPSHOT_NOW_EPOCH=1785672000 \
     "$SNAPSHOT" --json)
   rc=$?
   [ "$rc" -eq 0 ] || fail "snapshot must still report without scratch space, got exit $rc"
+  printf '%s' "$without" | jq -e '
+    [.secondmate_current.records[].provenance.selected] == ["structured-home"]
+  ' >/dev/null \
+    || fail "the no-scratch run degraded the registered home instead of reading it: $(
+         printf '%s' "$without" | jq -c \
+           '[.secondmate_current.records[] | {id, selected:.provenance.selected, reason:.current.reason}]')"
   [ "$without" = "$with" ] \
     || fail "the no-scratch fallback changed the emitted bytes: $(
          diff <(printf '%s' "$with") <(printf '%s' "$without") | head -5)"

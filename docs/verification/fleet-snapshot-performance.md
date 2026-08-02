@@ -110,6 +110,13 @@ instead, which needs nothing beyond jq.
 Verified 2026-08-02 by running the same fixture through a PATH containing every
 tool the snapshot uses except `mktemp`: exit 0, empty stderr, and output
 byte-identical to the same PATH with `mktemp` restored.
+An earlier version of that PATH omitted `env` and `ps`, which the registered
+secondmate aggregation needs, so the nested-home subtree failed identically in
+both runs and that part of the byte comparison could not fail.
+The fixture now provides both, and the test additionally asserts each run reads
+the registered home through the structured path (`provenance.selected` is
+`structured-home`) before comparing bytes, so a silently degraded subtree fails
+the control instead of matching the degraded no-scratch run.
 
 ## Output contract
 
