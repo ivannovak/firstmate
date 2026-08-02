@@ -26,6 +26,9 @@
 #   (i) lavish-axi is invoked by default and skipped under --no-open
 #   (j) a non-bearings document is refused instead of rendering an empty board
 #   (k) --help works and the artifact path is printed on stdout
+#   (l) headline roll-up: parked counts as stuck with the warning badge, done
+#       counts in neither headline and leaves the under-way denominator, and
+#       both rows still render under Under Way with their coverage keys
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -546,5 +549,61 @@ assert_contains "$help_out" "lavish-axi poll" "(k) --help does not document how 
 bad_flag_rc=$?
 expect_code 2 "$bad_flag_rc" "(k) an unknown flag"
 pass "(k) --help and the stdout path contract hold"
+
+# --- (l) headline roll-up: parked is a hold, done is out of the race ----------
+#
+# The captain's roll-up contract: "parked" is a deliberate stop, so it counts
+# under "Stuck or waiting" with the warning badge paused wears, never under
+# "Moving on their own"; "done" is finished-but-not-yet-cleaned-up, so it counts
+# in NEITHER headline and leaves the "of N under way" denominator, while both
+# rows still render under Under Way with their coverage keys. The tile reader is
+# proved on the untouched board first - its expected measurements differ across
+# the two documents, so it cannot pass by echoing a constant.
+headline_count() {  # <html-file> <tile-label>; the big number under that label
+  grep -A1 -F ">$2</p>" "$1" | sed -n "s/.*leading-none'>\([0-9][0-9]*\)<.*/\1/p" | head -n 1
+}
+
+[ -z "$(headline_count "$FULL_HTML" "No such tile")" ] \
+  || fail "(l) the tile reader invents a number for a tile that does not exist"
+[ "$(headline_count "$FULL_HTML" "Moving on their own")" = "2" ] \
+  || fail "(l) baseline: expected 2 moving (working + active_child_work), got '$(headline_count "$FULL_HTML" "Moving on their own")'"
+[ "$(headline_count "$FULL_HTML" "Stuck or waiting")" = "3" ] \
+  || fail "(l) baseline: expected 3 stuck (1 paused + 2 gates), got '$(headline_count "$FULL_HTML" "Stuck or waiting")'"
+
+ROLLUP="$TMP_ROOT/bearings-rollup.json"
+jq '.in_flight += [
+      {"id": "mu-parked", "kind": "ship", "state": "parked", "doing": "captain parked it"},
+      {"id": "nu-done", "kind": "ship", "state": "done", "doing": "finished, awaiting teardown"}
+    ]' "$FIXTURE" > "$ROLLUP"
+ROLLUP_HTML="$TMP_ROOT/rollup.html"
+"$BOARD" --from-json "$ROLLUP" --out "$ROLLUP_HTML" --no-open >/dev/null \
+  || fail "(l) rendering the roll-up projection failed"
+
+[ "$(headline_count "$ROLLUP_HTML" "Moving on their own")" = "2" ] \
+  || fail "(l) a parked or done row leaked into Moving: expected 2, got '$(headline_count "$ROLLUP_HTML" "Moving on their own")'"
+[ "$(headline_count "$ROLLUP_HTML" "Stuck or waiting")" = "4" ] \
+  || fail "(l) a parked row must count as stuck: expected 4 (paused + parked + 2 gates), got '$(headline_count "$ROLLUP_HTML" "Stuck or waiting")'"
+
+rollup_board=$(cat "$ROLLUP_HTML")
+# done leaves the denominator, and the caption says where the finished row went.
+assert_contains "$rollup_board" "of 4 under way, 1 finished awaiting cleanup" \
+  "(l) a done row still inflates the under-way denominator or is undisclosed"
+# Parking is deliberate, not a failure: warning badge, same as paused.
+assert_contains "$rollup_board" "badge-warning'>parked<" \
+  "(l) a parked row does not wear the warning badge"
+assert_not_contains "$rollup_board" "badge-error'>parked<" \
+  "(l) a parked row wears the error badge, but parking is not a failure"
+# Both rows still render under Under Way with their coverage keys - the roll-up
+# never moves an item between sections.
+ROLLUP_KEYS="$TMP_ROOT/rollup-keys.txt"
+board_keys_from_json "$ROLLUP" > "$ROLLUP_KEYS"
+if ! rollup_coverage=$(board_missing_keys "$ROLLUP_KEYS" "$ROLLUP_HTML"); then
+  fail "(l) the roll-up dropped a row from the board:"$'\n'"$rollup_coverage"
+fi
+assert_contains "$rollup_board" "data-fm-item='in_flight:mu-parked'" \
+  "(l) the parked row lost its coverage key"
+assert_contains "$rollup_board" "data-fm-item='in_flight:nu-done'" \
+  "(l) the done row lost its coverage key"
+pass "(l) parked counts as stuck, done counts in neither headline, both still render"
 
 printf 'ok - fm-fleet-board: all cases passed\n'

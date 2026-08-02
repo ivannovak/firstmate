@@ -19,8 +19,13 @@
 # candidate_prs[] are bearings' own reference surfaces and get their own panels,
 # so nothing bearings publishes is dropped. The headline counts are display
 # roll-ups over fields bearings itself publishes (an item's `state`); they never
-# move an item between sections. A field this board wants but bearings does not
-# expose belongs in the bearings projection, not here.
+# move an item between sections. In that roll-up "parked" is a deliberate stop,
+# so it counts as a hold under "Stuck or waiting" (warning badge, not error);
+# "done" is finished-but-not-yet-cleaned-up, so it counts in neither headline
+# and leaves the "of N under way" denominator - finished work is already
+# represented under Recently Landed. Parked and done rows still render under
+# Under Way like every other in_flight row. A field this board wants but
+# bearings does not expose belongs in the bearings projection, not here.
 #
 # PULL REQUESTS render as their full https URL, never a bare "#number". That
 # governs the board's own PR renderings. A bare number can also arrive inside
@@ -136,13 +141,16 @@ def dash: if blank then null else . end;
 def itemkey($surface; $i): "\($surface):\(if (.id | blank) then ($i | tostring) else .id end)";
 # Display roll-up only: reads the `state` bearings already publishes so the
 # captain can see at a glance what is moving. It never moves an item between
-# sections - every in_flight row still renders under Under Way.
+# sections - every in_flight row still renders under Under Way. "parked" is a
+# deliberate stop, so it is a hold (warning badge, not error); "done" is
+# finished-but-not-yet-cleaned-up, so it counts in neither headline and leaves
+# the under-way denominator - Recently Landed already carries finished work.
 def needs_attention: . as $s
-  | ["paused","blocked","failed","needs-decision","stale","cancelled","unknown"]
+  | ["parked","paused","blocked","failed","needs-decision","stale","cancelled","unknown"]
   | index($s) != null;
 def state_badge: . as $s
   | if ($s | needs_attention) then
-      (if $s == "paused" then "badge-warning" else "badge-error" end)
+      (if $s == "paused" or $s == "parked" then "badge-warning" else "badge-error" end)
     elif $s == "working" or $s == "active_child_work" then "badge-success"
     else "badge-neutral" end;
 def link_or_text($v):
@@ -170,8 +178,10 @@ def empty_note($text): "<p class='rounded-box bg-base-100 p-4 text-sm opacity-60
 | (.omitted // []) as $omitted
 | ($recorded_prs | map({key: (.id | tostring), value: .url}) | from_entries) as $pr_by_id
 | ($reports | map({key: (.id | tostring), value: .path}) | from_entries) as $report_by_id
+| ([$in_flight[] | select(.state == "done")] | length) as $finished
+| (($in_flight | length) - $finished) as $underway
 | ([$in_flight[] | select(.state | needs_attention)] | length) as $stalled
-| (($in_flight | length) - $stalled) as $moving
+| ($underway - $stalled) as $moving
 | ($gates | length) as $waiting
 
 | [
@@ -227,12 +237,12 @@ def empty_note($text): "<p class='rounded-box bg-base-100 p-4 text-sm opacity-60
 "<div class='rounded-box border border-base-content/10 bg-base-100 p-5'>",
 "<p class='text-xs font-semibold uppercase tracking-wider opacity-60'>Moving on their own</p>",
 "<p class='mt-1 text-5xl font-bold leading-none'>\($moving)</p>",
-"<p class='mt-2 text-sm opacity-70'>of \($in_flight | length) under way</p>",
+"<p class='mt-2 text-sm opacity-70'>of \($underway) under way\(if $finished > 0 then ", \($finished) finished awaiting cleanup" else "" end)</p>",
 "</div>",
 "<div class='rounded-box border border-base-content/10 bg-base-100 p-5'>",
 "<p class='text-xs font-semibold uppercase tracking-wider opacity-60'>Stuck or waiting</p>",
 "<p class='mt-1 text-5xl font-bold leading-none'>\($stalled + $waiting)</p>",
-"<p class='mt-2 text-sm opacity-70'>\($stalled) stalled under way, \($waiting) not started</p>",
+"<p class='mt-2 text-sm opacity-70'>\($stalled) held or stalled under way, \($waiting) not started</p>",
 "</div>",
 "<div class='rounded-box border border-base-content/10 bg-base-100 p-5'>",
 "<p class='text-xs font-semibold uppercase tracking-wider opacity-60'>Recently landed</p>",
