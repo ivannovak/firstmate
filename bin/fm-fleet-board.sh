@@ -209,7 +209,7 @@ def empty_note($text): "<p class='rounded-box bg-base-100 p-4 text-sm opacity-60
 "<span class='badge badge-soft badge-primary'>\(.home | h)</span>",
 "<span class='text-xs opacity-60'>as of \(.generated | h)</span>",
 "<div class='ml-auto flex items-center gap-2'>",
-"<span class='text-xs opacity-60'>\(.prs | h)</span>",
+"<span class='text-xs opacity-60'>Live pull-request checks: \(.prs | h)</span>",
 "<button id='fm-theme-toggle' type='button' class='btn btn-ghost btn-xs'>Theme</button>",
 "</div>",
 "</div>",
