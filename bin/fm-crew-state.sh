@@ -30,7 +30,12 @@
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      passed/checks-passed -> done, failed/cancelled -> failed. A terminal
+#      pass with a SKIPPED pr or ci step reports failed instead of done
+#      (see nm_skipped_delivery_steps): the pipeline reaches outcome=passed
+#      with those steps silently skipped when its daemon's gh is
+#      unauthenticated, and no PR/CI evidence exists behind such a pass.
+#      EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
@@ -249,6 +254,19 @@ log_reports_ci_ready() {
   esac
 }
 
+# A terminal outcome is only as strong as the delivery steps behind it.
+# Verified 2026-08-06 against the installed v1.41.2 binary (real run
+# 01KZBCA6DEHQC1404F34QJE0CC): when the pipeline daemon's gh is unauthenticated
+# it SKIPS the pr and ci steps ("skipping PR creation: gh CLI is not
+# authenticated" in the step log) yet still reports outcome=passed, so a run
+# can "pass" having never opened a PR and never observed a CI check. Echoes the
+# skipped delivery step names (pr/ci) from the steps[] table, one per line;
+# empty when none are skipped.
+nm_skipped_delivery_steps() {
+  printf '%s\n' "$RUN_OUT" \
+    | sed -n -E 's/^[[:space:]]*(pr|ci),[[:space:]]*"?skipped"?[[:space:]]*,.*/\1/p'
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -447,8 +465,16 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        passed|checks-passed)
+          SKIPPED_DELIVERY=$(nm_skipped_delivery_steps | paste -sd/ -)
+          if [ -n "$SKIPPED_DELIVERY" ]; then
+            RUN_STATE=failed
+            RUN_DETAIL="run reported $outcome but skipped delivery step(s) $SKIPPED_DELIVERY: no PR/CI evidence exists, do not trust the pass (daemon gh auth?)"
+          elif [ "$outcome" = passed ]; then
+            RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed"
+          else
+            RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"
+          fi ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
@@ -472,7 +498,14 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        completed)
+          SKIPPED_DELIVERY=$(nm_skipped_delivery_steps | paste -sd/ -)
+          if [ -n "$SKIPPED_DELIVERY" ]; then
+            RUN_STATE=failed
+            RUN_DETAIL="run completed but skipped delivery step(s) $SKIPPED_DELIVERY: no PR/CI evidence exists (daemon gh auth?)"
+          else
+            RUN_STATE="done"; RUN_DETAIL="run completed"
+          fi ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
         cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;

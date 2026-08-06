@@ -291,6 +291,89 @@ outcome: failed
 EOF
 }
 
+# Mirrors the real v1.41.2 output for a run whose daemon-side gh was
+# unauthenticated: push completes, pr and ci are SKIPPED, yet the top-level
+# outcome still reads passed (verified against real run
+# 01KZBCA6DEHQC1404F34QJE0CC, 2026-08-06, whose pr.log reads "skipping PR
+# creation: gh CLI is not authenticated").
+run_passed_delivery_skipped() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    rebase,completed,0,1820
+    review,completed,1,199827
+    test,completed,0,605653
+    document,completed,0,265219
+    lint,completed,1,12
+    push,completed,0,4551
+    pr,skipped,0,26
+    ci,skipped,0,28
+outcome: passed
+EOF
+}
+
+run_checks_passed_ci_skipped() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/3"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    push,completed,0,0
+    pr,completed,0,0
+    ci,skipped,0,0
+outcome: checks-passed
+EOF
+}
+
+run_completed_no_outcome_delivery_skipped() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    push,completed,0,0
+    pr,skipped,0,26
+    ci,skipped,0,28
+EOF
+}
+
+# Negative control: a passed run whose pr and ci steps genuinely COMPLETED must
+# keep reporting done, proving the skipped-step guard matches only skipped rows.
+run_passed_delivery_completed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/4"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    push,completed,0,0
+    pr,completed,0,120
+    ci,completed,0,300
+outcome: passed
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -669,6 +752,64 @@ test_terminal_passed() {
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
   pass "terminal passed run is authoritative"
+}
+
+# A terminal outcome is only as strong as the delivery steps behind it: a run
+# whose pr or ci step was SKIPPED (daemon-side gh unauthenticated) must never
+# read as done, because no PR was opened and no CI check was ever observed.
+test_terminal_passed_with_skipped_delivery_steps_fails() {
+  reset_fakes
+  local d; d=$(new_case passed-skipped)
+  make_repo_on_branch "$d/wt" fm/feat-ds
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ds.meta" "window=fm:fm-feat-ds" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_delivery_skipped fm/feat-ds)"
+  local out; out=$(run_crew_state "$d" feat-ds)
+  assert_contains "$out" "state: failed" "passed with skipped pr/ci -> failed"
+  assert_contains "$out" "source: run-step" "skipped-delivery verdict stays run-step sourced"
+  assert_contains "$out" "skipped" "detail names the skipped delivery steps"
+  assert_not_contains "$out" "PR merged/closed" "must not claim a merged PR that never existed"
+  assert_not_contains "$out" "state: done" "must not report done"
+  pass "passed outcome with skipped pr/ci steps reports failed"
+}
+
+test_checks_passed_with_skipped_ci_fails() {
+  reset_fakes
+  local d; d=$(new_case checks-passed-skipped)
+  make_repo_on_branch "$d/wt" fm/feat-cs
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cs.meta" "window=fm:fm-feat-cs" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed_ci_skipped fm/feat-cs)"
+  local out; out=$(run_crew_state "$d" feat-cs)
+  assert_contains "$out" "state: failed" "checks-passed with skipped ci -> failed"
+  assert_not_contains "$out" "state: done" "must not report done"
+  pass "checks-passed outcome with skipped ci step reports failed"
+}
+
+test_completed_status_with_skipped_delivery_steps_fails() {
+  reset_fakes
+  local d; d=$(new_case completed-skipped)
+  make_repo_on_branch "$d/wt" fm/feat-ns
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ns.meta" "window=fm:fm-feat-ns" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_completed_no_outcome_delivery_skipped fm/feat-ns)"
+  local out; out=$(run_crew_state "$d" feat-ns)
+  assert_contains "$out" "state: failed" "completed status with skipped pr/ci -> failed"
+  assert_not_contains "$out" "state: done" "must not report done"
+  pass "completed status with skipped pr/ci steps reports failed"
+}
+
+test_terminal_passed_with_completed_delivery_steps_stays_done() {
+  reset_fakes
+  local d; d=$(new_case passed-delivered)
+  make_repo_on_branch "$d/wt" fm/feat-dd
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dd.meta" "window=fm:fm-feat-dd" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_delivery_completed fm/feat-dd)"
+  local out; out=$(run_crew_state "$d" feat-dd)
+  assert_contains "$out" "state: done" "passed with completed pr/ci stays done"
+  assert_not_contains "$out" "state: failed" "guard must not fire on completed delivery steps"
+  pass "passed outcome with completed pr/ci steps stays done"
 }
 
 test_terminal_failed() {
@@ -1328,6 +1469,10 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_terminal_passed_with_skipped_delivery_steps_fails
+test_checks_passed_with_skipped_ci_fails
+test_completed_status_with_skipped_delivery_steps_fails
+test_terminal_passed_with_completed_delivery_steps_stays_done
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
