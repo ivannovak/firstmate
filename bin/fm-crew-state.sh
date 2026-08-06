@@ -30,7 +30,11 @@
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      checks-passed -> done, failed/cancelled -> failed. Terminal passed ->
+#      done, claiming a merge only when the ci step ran to completion; passed
+#      with its pr or ci steps skipped -> unknown, because the pipeline
+#      observed no merge and the work must be treated as UNLANDED (the
+#      passed-outcome mapping below owns the dated evidence). EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
