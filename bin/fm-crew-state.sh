@@ -34,7 +34,8 @@
 #      pass with a SKIPPED pr or ci step reports failed instead of done
 #      (see nm_skipped_delivery_steps): the pipeline reaches outcome=passed
 #      with those steps silently skipped when its daemon's gh is
-#      unauthenticated, and no PR/CI evidence exists behind such a pass.
+#      unauthenticated, so the evidence each skipped step would have produced
+#      does not exist behind such a pass (see nm_missing_delivery_evidence).
 #      EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
@@ -267,6 +268,26 @@ nm_skipped_delivery_steps() {
     | sed -n -E 's/^[[:space:]]*(pr|ci),[[:space:]]*"?skipped"?[[:space:]]*,.*/\1/p'
 }
 
+# Names ONLY the evidence that is actually missing, derived from which delivery
+# steps were skipped: a skipped pr step means no pull request was ever opened, a
+# skipped ci step means no CI check was ever observed. The distinction matters -
+# a run can skip ci alone while its pr step completed and a real PR URL exists,
+# and claiming no PR evidence there would steer an operator away from a pull
+# request that really is open. Takes the slash-joined list from
+# nm_skipped_delivery_steps.
+nm_missing_delivery_evidence() {  # <slash-joined skipped steps>
+  local pr_skipped=0 ci_skipped=0
+  case "/$1/" in *"/pr/"*) pr_skipped=1 ;; esac
+  case "/$1/" in *"/ci/"*) ci_skipped=1 ;; esac
+  if [ "$pr_skipped" = 1 ] && [ "$ci_skipped" = 1 ]; then
+    printf 'no pull request was opened and no CI check was observed'
+  elif [ "$pr_skipped" = 1 ]; then
+    printf 'no pull request was opened'
+  elif [ "$ci_skipped" = 1 ]; then
+    printf 'no CI check was observed'
+  fi
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -441,15 +462,25 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
-    # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
+    # working, failed, or an uncertifiable terminal (unknown). A crew genuinely
+    # parked at a gate still gets full detail once `axi status` reports its own
+    # branch again (e.g. once its own step is the most-recently-touched one),
+    # and its own needs-decision/blocked status-log append (a captain-relevant
+    # VERB) is surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
+    #
+    # A coarse `completed` row deliberately does NOT report done. The runs list
+    # carries no steps[] table, so nm_skipped_delivery_steps has nothing to read
+    # and there is zero delivery-step evidence behind that row - a run that
+    # skipped its pr and ci steps looks exactly like a genuinely delivered one
+    # here. Calling it done would reopen, on this path alone, the very bypass
+    # the skipped-delivery guard exists to close, so an honest unknown is the
+    # correct verdict: the run is terminal, but this source cannot certify what
+    # it delivered. The failed/cancelled arms need no such evidence - a run that
+    # did not pass cannot have delivered anything to over-trust.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+      completed) RUN_STATE=unknown; RUN_DETAIL="terminal run found via the runs list, which carries no delivery-step evidence: done cannot be certified (check axi status for this branch's own run)" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
@@ -469,7 +500,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           SKIPPED_DELIVERY=$(nm_skipped_delivery_steps | paste -sd/ -)
           if [ -n "$SKIPPED_DELIVERY" ]; then
             RUN_STATE=failed
-            RUN_DETAIL="run reported $outcome but skipped delivery step(s) $SKIPPED_DELIVERY: no PR/CI evidence exists, do not trust the pass (daemon gh auth?)"
+            RUN_DETAIL="run reported $outcome but skipped delivery step(s) $SKIPPED_DELIVERY: $(nm_missing_delivery_evidence "$SKIPPED_DELIVERY"), do not trust the pass (daemon gh auth?)"
           elif [ "$outcome" = passed ]; then
             RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed"
           else
@@ -502,7 +533,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           SKIPPED_DELIVERY=$(nm_skipped_delivery_steps | paste -sd/ -)
           if [ -n "$SKIPPED_DELIVERY" ]; then
             RUN_STATE=failed
-            RUN_DETAIL="run completed but skipped delivery step(s) $SKIPPED_DELIVERY: no PR/CI evidence exists (daemon gh auth?)"
+            RUN_DETAIL="run completed but skipped delivery step(s) $SKIPPED_DELIVERY: $(nm_missing_delivery_evidence "$SKIPPED_DELIVERY") (daemon gh auth?)"
           else
             RUN_STATE="done"; RUN_DETAIL="run completed"
           fi ;;

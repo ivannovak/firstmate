@@ -768,11 +768,16 @@ test_terminal_passed_with_skipped_delivery_steps_fails() {
   assert_contains "$out" "state: failed" "passed with skipped pr/ci -> failed"
   assert_contains "$out" "source: run-step" "skipped-delivery verdict stays run-step sourced"
   assert_contains "$out" "skipped" "detail names the skipped delivery steps"
+  assert_contains "$out" "no pull request was opened and no CI check was observed" \
+    "both steps skipped -> detail names both missing pieces of evidence"
   assert_not_contains "$out" "PR merged/closed" "must not claim a merged PR that never existed"
   assert_not_contains "$out" "state: done" "must not report done"
   pass "passed outcome with skipped pr/ci steps reports failed"
 }
 
+# Only the ci step was skipped here: the pr step COMPLETED and a real PR URL
+# exists, so the detail must name the missing CI evidence and nothing else.
+# Claiming no PR evidence would steer an operator away from a PR that is open.
 test_checks_passed_with_skipped_ci_fails() {
   reset_fakes
   local d; d=$(new_case checks-passed-skipped)
@@ -782,6 +787,9 @@ test_checks_passed_with_skipped_ci_fails() {
   FM_FAKE_AXI_STATUS="$(run_checks_passed_ci_skipped fm/feat-cs)"
   local out; out=$(run_crew_state "$d" feat-cs)
   assert_contains "$out" "state: failed" "checks-passed with skipped ci -> failed"
+  assert_contains "$out" "no CI check was observed" "detail names the missing CI evidence"
+  assert_not_contains "$out" "no pull request was opened" \
+    "must not deny a PR whose step completed and whose URL exists"
   assert_not_contains "$out" "state: done" "must not report done"
   pass "checks-passed outcome with skipped ci step reports failed"
 }
@@ -795,6 +803,8 @@ test_completed_status_with_skipped_delivery_steps_fails() {
   FM_FAKE_AXI_STATUS="$(run_completed_no_outcome_delivery_skipped fm/feat-ns)"
   local out; out=$(run_crew_state "$d" feat-ns)
   assert_contains "$out" "state: failed" "completed status with skipped pr/ci -> failed"
+  assert_contains "$out" "no pull request was opened and no CI check was observed" \
+    "both steps skipped -> detail names both missing pieces of evidence"
   assert_not_contains "$out" "state: done" "must not report done"
   pass "completed status with skipped pr/ci steps reports failed"
 }
@@ -877,6 +887,56 @@ EOF
   assert_contains "$out" "state: working" "most recent (running) row wins over an older completed row"
   assert_contains "$out" "source: run-step" "most-recent-row resolution -> run-step source"
   pass "cross-branch attribution picks the branch's most recent row"
+}
+
+# The coarse runs list carries no steps[] table, so nm_skipped_delivery_steps
+# has nothing to read on this path: a run that skipped its pr and ci steps is
+# indistinguishable from a genuinely delivered one. Reporting done here would be
+# a live bypass of the skipped-delivery guard, so a terminal coarse row reports
+# an honest unknown instead - the run finished, but this source cannot certify
+# what it delivered.
+test_coarse_completed_row_cannot_certify_done() {
+  reset_fakes
+  local d short; d=$(new_case coarse-completed)
+  make_repo_on_branch "$d/wt" fm/feat-cc
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cc.meta" "window=fm:fm-feat-cc" "worktree=$d/wt" "kind=ship"
+  # Bare `axi status` answers another crew's branch, so attribution falls
+  # through to the runs list, where this branch's own row is terminal.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-07-02 22:10
+  completed  fm/feat-cc ${short}  2026-07-02 22:05
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-cc)
+  assert_contains "$out" "state: unknown" "coarse completed row -> unknown, not a certified pass"
+  assert_contains "$out" "source: run-step" "coarse terminal verdict stays run-step sourced"
+  assert_contains "$out" "no delivery-step evidence" "detail says why done cannot be certified"
+  assert_not_contains "$out" "state: done" "coarse row must never certify delivery it never observed"
+  pass "coarse completed row reports unknown instead of done"
+}
+
+# The failed/cancelled coarse arms need no delivery evidence - a run that did not
+# pass cannot have delivered anything to over-trust - so they must stay failed.
+test_coarse_failed_row_still_reports_failed() {
+  reset_fakes
+  local d short; d=$(new_case coarse-failed)
+  make_repo_on_branch "$d/wt" fm/feat-cf
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cf.meta" "window=fm:fm-feat-cf" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-07-02 22:10
+  failed     fm/feat-cf ${short}  2026-07-02 22:05
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-cf)
+  assert_contains "$out" "state: failed" "coarse failed row stays failed"
+  assert_not_contains "$out" "state: unknown" "the unknown verdict is scoped to the completed arm"
+  pass "coarse failed row still reports failed"
 }
 
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
@@ -1476,6 +1536,8 @@ test_terminal_passed_with_completed_delivery_steps_stays_done
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
+test_coarse_completed_row_cannot_certify_done
+test_coarse_failed_row_still_reports_failed
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
