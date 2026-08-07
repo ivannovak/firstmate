@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared validation and atomic artifact helpers for merge polling on the
+# Shared validation and atomic artifact helpers for PR polling on the
 # supported forges. Callers must validate task IDs and raw PR/MR URLs before
 # constructing task paths or performing any side effect.
 #
