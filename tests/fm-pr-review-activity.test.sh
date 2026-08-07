@@ -16,14 +16,21 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-review-activity)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 PR_URL=https://github.com/o/r/pull/10
+PR_URL_LATER=https://github.com/o/r/pull/11
+MR_URL=https://gitlab.com/g/p/-/merge_requests/7
 ACTIVITY_ONE='1 5 2026-08-06T16:16:23Z'
 ACTIVITY_TWO='2 5 2026-08-07T09:00:00Z'
 LINE_ONE='review-activity reviews=1 comments=5 latest=2026-08-06T16:16:23Z'
 LINE_TWO='review-activity reviews=2 comments=5 latest=2026-08-07T09:00:00Z'
+REVIEWER_LINE='review-activity reviews=0 comments=1 latest=2026-08-06T16:16:23Z'
 
 # A fake gh reproducing the two independent reads the poll performs: the merge
 # state, and the review-activity projection. Each is separately failable so the
 # tests can drive one red without disturbing the other.
+# FM_TEST_GH_ACTIVITY hands back a projection result directly. When
+# FM_TEST_GH_ACTIVITY_JSON names a fixture instead, the poll's OWN -q expression
+# is evaluated against it by a real jq, so what is under test is the projection
+# that ships rather than a restatement of it.
 make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
@@ -31,20 +38,45 @@ make_case() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/wt" "$fakebin"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+url=
+query=
+want_query=0
+for a in "$@"; do
+  if [ "$want_query" = 1 ]; then query=$a; want_query=0; continue; fi
+  case "$a" in
+    -q) want_query=1 ;;
+    https://*) url=$a ;;
+  esac
+done
 case " $* " in
   *" --json state "*)
     [ "${FM_TEST_GH_STATE_FAIL:-0}" = 0 ] || exit 1
+    case "${FM_TEST_GH_MERGED_URL:-}" in
+      '') ;;
+      "$url") printf '%s\n' MERGED; exit 0 ;;
+    esac
     printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
     ;;
   *" --json reviews,comments "*)
     [ "${FM_TEST_GH_ACTIVITY_FAIL:-0}" = 0 ] || exit 1
     [ "${FM_TEST_GH_ACTIVITY_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_ACTIVITY_SLEEP"
+    if [ -n "${FM_TEST_GH_ACTIVITY_JSON:-}" ]; then
+      jq -r "$query" < "$FM_TEST_GH_ACTIVITY_JSON" || exit 1
+      exit 0
+    fi
     [ -z "${FM_TEST_GH_ACTIVITY-}" ] || printf '%s\n' "$FM_TEST_GH_ACTIVITY"
     ;;
 esac
 SH
   chmod +x "$fakebin/gh"
   printf '%s\n' "$dir"
+}
+
+# Put the real jq where the fake gh can reach it, for the fixture mode above.
+lend_jq() {
+  local dir=$1 real
+  real=$(command -v jq 2>/dev/null) || return 1
+  ln -sf "$real" "$dir/fakebin/jq"
 }
 
 write_task_meta() {
@@ -66,10 +98,10 @@ run_poll() {
 }
 
 arm_poll() {
-  local dir=$1 id=${2:-task-a}
+  local dir=$1 id=${2:-task-a} url=${3:-$PR_URL}
   env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
     FM_TEST_GH_ACTIVITY="${FM_TEST_GH_ACTIVITY-}" \
-    "$PR_CHECK" "$id" "$PR_URL"
+    "$PR_CHECK" "$id" "$url"
 }
 
 # Run the real watcher until it wakes, or until the bound expires. Exit 0 with
@@ -285,7 +317,139 @@ SH
   pass "teardown removes the review-activity cursor with the rest of the task's records"
 }
 
+test_sweep_continues_past_a_review_activity_wake() {
+  local dir state result
+  dir=$(make_case sweep-continues)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  write_task_meta "$dir" task-b
+  # Both armed quiet, so what each reports on the sweep below is genuinely new.
+  export FM_TEST_GH_ACTIVITY='0 0 '
+  arm_poll "$dir" task-a > "$dir/arm-a.out" 2>/dev/null || fail "could not arm task-a"
+  arm_poll "$dir" task-b "$PR_URL_LATER" > "$dir/arm-b.out" 2>/dev/null \
+    || fail "could not arm task-b"
+
+  # task-a is chatty and task-b's pull request lands, in that glob order. A
+  # review-activity line is not terminal, so it must not end the sweep before
+  # the merge behind it is ever looked at.
+  export FM_TEST_GH_ACTIVITY=$ACTIVITY_ONE
+  export FM_TEST_GH_MERGED_URL=$PR_URL_LATER
+  result=$(sweep "$dir")
+  [ "$result" = "0 check: $state/task-b.check.sh: merged" ] \
+    || fail "the sweep did not reach the later task's merge (watcher reported: $result)"
+  grep -q 'review-activity' "$state/.wake-queue" \
+    || fail "the review-activity wake was not durably queued while the sweep continued"
+  [ "$(cat "$state/.task-a.pr-activity-cursor")" = "$LINE_ONE" ] \
+    || fail "the continued sweep did not record the review activity it surfaced"
+  unset FM_TEST_GH_ACTIVITY FM_TEST_GH_MERGED_URL
+  pass "a review-activity wake does not starve a later poll in the same sweep"
+}
+
+test_self_authored_comments_are_not_review_activity() {
+  local dir out
+  dir=$(make_case activity-self-authored)
+  lend_jq "$dir" || { echo "skip: jq not found (it evaluates the poll's own gh projection)"; return 0; }
+  cat > "$dir/none.json" <<'JSON'
+{"reviews":[],"comments":[]}
+JSON
+  cat > "$dir/reviewer.json" <<'JSON'
+{"reviews":[],"comments":[{"createdAt":"2026-08-06T16:16:23Z","viewerDidAuthor":false}]}
+JSON
+  cat > "$dir/mine.json" <<'JSON'
+{"reviews":[],"comments":[{"createdAt":"2026-08-07T09:00:00Z","viewerDidAuthor":true}]}
+JSON
+  cat > "$dir/both.json" <<'JSON'
+{"reviews":[],"comments":[{"createdAt":"2026-08-06T16:16:23Z","viewerDidAuthor":false},{"createdAt":"2026-08-07T09:00:00Z","viewerDidAuthor":true}]}
+JSON
+  cat > "$dir/unlabelled.json" <<'JSON'
+{"reviews":[],"comments":[{"createdAt":"2026-08-06T16:16:23Z"}]}
+JSON
+  # gh carries no viewerDidAuthor on a review, so a review stays counted whoever
+  # submitted it; only the issue comments below are excludable.
+  cat > "$dir/own-review.json" <<'JSON'
+{"reviews":[{"submittedAt":"2026-08-07T09:00:00Z"}],"comments":[{"createdAt":"2026-08-06T16:16:23Z","viewerDidAuthor":true}]}
+JSON
+
+  out=$(FM_TEST_GH_ACTIVITY_JSON="$dir/reviewer.json" run_poll "$dir")
+  [ "$out" = "$REVIEWER_LINE" ] || fail "someone else's comment was not review activity: '$out'"
+  out=$(FM_TEST_GH_ACTIVITY_JSON="$dir/mine.json" run_poll "$dir")
+  [ -z "$out" ] || fail "firstmate's own comment was reported as review activity: '$out'"
+  # The exclusion has to reach the instant too, or a self-authored comment would
+  # still move the marker and wake firstmate about itself.
+  out=$(FM_TEST_GH_ACTIVITY_JSON="$dir/both.json" run_poll "$dir")
+  [ "$out" = "$REVIEWER_LINE" ] || fail "a self-authored comment moved the reported line: '$out'"
+  # A field that stops being reported must count, never silently suppress.
+  out=$(FM_TEST_GH_ACTIVITY_JSON="$dir/unlabelled.json" run_poll "$dir")
+  [ "$out" = "$REVIEWER_LINE" ] || fail "a comment with no viewerDidAuthor was dropped: '$out'"
+  out=$(FM_TEST_GH_ACTIVITY_JSON="$dir/own-review.json" run_poll "$dir")
+  [ "$out" = 'review-activity reviews=1 comments=0 latest=2026-08-07T09:00:00Z' ] \
+    || fail "a review was excluded rather than counted: '$out'"
+
+  # And through the watcher: firstmate talking to itself is not a wake.
+  write_task_meta "$dir"
+  export FM_TEST_GH_ACTIVITY_JSON="$dir/none.json"
+  arm_poll "$dir" > "$dir/arm.out" 2>/dev/null || fail "could not arm the poll"
+  FM_TEST_GH_ACTIVITY_JSON="$dir/mine.json" \
+    assert_no_wake "$dir" "firstmate's own comment woke firstmate"
+  FM_TEST_GH_ACTIVITY_JSON="$dir/reviewer.json" \
+    assert_wake "$dir" "$REVIEWER_LINE" "a reviewer's comment did not wake firstmate"
+  unset FM_TEST_GH_ACTIVITY_JSON
+  pass "firstmate's own comments are not review activity and never move the instant"
+}
+
+test_arming_a_gitlab_merge_request_makes_no_forge_call() {
+  local dir state
+  dir=$(make_case gitlab-arm)
+  state="$dir/home/state"
+  cat > "$dir/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GLAB_CALLS"
+printf 'state:\topened\n'
+SH
+  chmod +x "$dir/fakebin/glab"
+  write_task_meta "$dir"
+  : > "$dir/glab-calls"
+  # Only GitHub can report review activity, so arming a merge request must not
+  # pay an untimed forge round trip to be told so.
+  env FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    FM_TEST_GLAB_CALLS="$dir/glab-calls" \
+    "$PR_CHECK" task-a "$MR_URL" > "$dir/arm.out" 2>/dev/null \
+    || fail "could not arm the GitLab merge request"
+  [ ! -s "$dir/glab-calls" ] \
+    || fail "arming a GitLab merge request called glab: $(tr '\n' ';' < "$dir/glab-calls")"
+  [ ! -e "$state/.task-a.pr-activity-cursor" ] \
+    || fail "arming a GitLab merge request stored a review-activity cursor"
+  pass "arming a GitLab merge request makes no forge call for the review-activity seed"
+}
+
 # --- the cursor's own contract ----------------------------------------------
+
+test_cursor_clear_removes_a_symlinked_cursor() {
+  local dir state cursor
+  dir=$(make_case cursor-clear-symlink)
+  state="$dir/home/state"
+  cursor="$state/.task-a.pr-activity-cursor"
+  printf 'stale\n' > "$dir/elsewhere"
+  ln -s "$dir/elsewhere" "$cursor"
+  # rm unlinks the symlink itself and never follows it, so refusing here would
+  # leave in place exactly the artifact this exists to remove.
+  fm_pr_activity_cursor_clear "$state" task-a \
+    || fail "the cursor clear refused to remove a symlinked cursor"
+  [ ! -L "$cursor" ] && [ ! -e "$cursor" ] || fail "the symlinked cursor survived the clear"
+  [ -f "$dir/elsewhere" ] || fail "the clear followed the symlink and removed its target"
+
+  # End to end: a symlinked cursor is repairable by re-arming, rather than
+  # waking firstmate every sweep until teardown.
+  write_task_meta "$dir"
+  ln -s "$dir/elsewhere" "$cursor"
+  export FM_TEST_GH_ACTIVITY=$ACTIVITY_ONE
+  arm_poll "$dir" > "$dir/arm.out" 2>/dev/null || fail "could not arm over a symlinked cursor"
+  [ ! -L "$cursor" ] || fail "arming left the cursor a symlink it can never write"
+  assert_wake "$dir" "$LINE_ONE" "the repaired cursor lost the activity wake"
+  assert_no_wake "$dir" "the symlinked cursor still woke firstmate every sweep"
+  unset FM_TEST_GH_ACTIVITY
+  pass "a symlinked cursor is removed by the clear and repaired by re-arming"
+}
 
 test_cursor_refuses_an_unsafe_destination() {
   local dir state
@@ -335,5 +499,9 @@ test_arming_clears_an_inherited_cursor_it_cannot_confirm
 test_a_failed_sweep_reports_nothing_and_keeps_the_cursor
 test_merge_signal_is_never_filtered_by_the_cursor
 test_teardown_removes_the_cursor
+test_sweep_continues_past_a_review_activity_wake
+test_self_authored_comments_are_not_review_activity
+test_arming_a_gitlab_merge_request_makes_no_forge_call
+test_cursor_clear_removes_a_symlinked_cursor
 test_cursor_refuses_an_unsafe_destination
 test_poll_output_that_is_not_activity_passes_through_unfiltered

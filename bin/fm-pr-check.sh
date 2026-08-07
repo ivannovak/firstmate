@@ -83,11 +83,22 @@ fi
 # request already carries by the time its checks go green. The poll owns the
 # query; this only stores what it reports right now. When it reports no usable
 # starting point the cursor is cleared instead of inherited, because one extra
-# wake is always preferable to a stale cursor suppressing a real one.
-FM_PR_ACTIVITY_PENDING=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-  "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null || true)
+# wake is always preferable to a stale cursor suppressing a real one. A cursor
+# that cannot be written is cleared for the same reason and more urgently: left
+# alone it would be rejected on every sweep from here on, and the unchanged
+# activity behind it would wake firstmate every CHECK_INTERVAL forever.
+# Only GitHub reports review activity, so only GitHub pays for the lookup:
+# arming a GitLab merge request makes no forge call here.
+FM_PR_ACTIVITY_PENDING=
+if [ "$PROVIDER" = github ]; then
+  FM_PR_ACTIVITY_PENDING=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+    "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null || true)
+fi
 case "$FM_PR_ACTIVITY_PENDING" in
-  'review-activity '*) fm_pr_activity_commit "$STATE" "$ID" || true ;;
+  'review-activity '*)
+    fm_pr_activity_commit "$STATE" "$ID" \
+      || fm_pr_activity_cursor_clear "$STATE" "$ID" || true
+    ;;
   *) FM_PR_ACTIVITY_PENDING=; fm_pr_activity_cursor_clear "$STATE" "$ID" || true ;;
 esac
 FM_PR_ACTIVITY_PENDING=

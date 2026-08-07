@@ -35,6 +35,10 @@ author, authorAssociation, body, createdAt, id, includesCreatedEdit, isMinimized
 There is no field-level projection on the wire: `--json reviews` fetches whole review bodies and `-q` filters them locally.
 The poll accepts that cost because it runs on the watcher's slow cadence and under `FM_CHECK_TIMEOUT`, and a read that exceeds the bound reports nothing rather than a wake.
 
+Read those two key lists against each other: `viewerDidAuthor` is present on a comment and absent from a review.
+That asymmetry is the whole reason the exclusion below covers comments only.
+Excluding a self-authored review would need an author-login comparison, which would put a string the pull request's authors control into the decision, so it is not done and a review stays counted whoever submitted it.
+
 ## Why counting reviews covers inline review comments too
 
 The poll reads `reviews` and `comments` and never the inline review-comment endpoint.
@@ -67,11 +71,11 @@ id=4865902117 state=COMMENTED
 
 ## The projection the poll actually reports
 
-`bin/fm-pr-poll.sh` reduces those two fields to review count, issue-comment count, and the newest instant across both:
+`bin/fm-pr-poll.sh` reduces those two fields to review count, issue-comment count, and the newest instant across both, counting only the comments firstmate did not write itself:
 
 ```
 $ gh pr view https://github.com/cli/cli/pull/14079 --json reviews,comments \
-    -q '[(.reviews|length|tostring),(.comments|length|tostring),(([(.reviews[]?.submittedAt),(.comments[]?.createdAt)]|map(select(. != null and . != ""))|max) // "")]|join(" ")'
+    -q '(.comments // []|map(select(.viewerDidAuthor != true))) as $c|[(.reviews|length|tostring),($c|length|tostring),(([(.reviews[]?.submittedAt),($c[]?.createdAt)]|map(select(. != null and . != ""))|max) // "")]|join(" ")'
 6 0 2026-08-05T15:12:33Z
 ```
 
@@ -80,6 +84,37 @@ The instant alone would miss two comments landing in the same second, and the co
 
 No string the pull request's authors control ever reaches the reported line: only the two counts and the one instant, each validated against a fixed pattern before it is printed.
 Firstmate reads the pull request itself for the content.
+
+## The self-authored exclusion, observed firing
+
+The exclusion cannot be demonstrated on `cli/cli`, because `viewerDidAuthor` is defined against whoever is authenticated and this record's viewer has commented on nothing there.
+The run below therefore reads one of our own pull requests, whose URL is redacted because it lives in a private repository; rerun it against any pull request you have commented on.
+Its comments are one from someone else and one newer one from the viewer:
+
+```
+$ gh pr view "$PR" --json comments -q '.comments[]|"viewerDidAuthor=\(.viewerDidAuthor) createdAt=\(.createdAt)"'
+viewerDidAuthor=false createdAt=2026-08-04T22:59:15Z
+viewerDidAuthor=true createdAt=2026-08-05T00:01:32Z
+```
+
+Without the exclusion, the viewer's own comment is both counted and the newest thing on the pull request, so it sets the reported instant, and firstmate wakes to be told about itself:
+
+```
+$ gh pr view "$PR" --json reviews,comments \
+    -q '[(.reviews|length|tostring),(.comments|length|tostring),(([(.reviews[]?.submittedAt),(.comments[]?.createdAt)]|map(select(. != null and . != ""))|max) // "")]|join(" ")'
+8 2 2026-08-05T00:01:32Z
+```
+
+With it, the count drops and the instant falls back to the newest thing someone else actually did, here the last of the eight reviews:
+
+```
+$ gh pr view "$PR" --json reviews,comments \
+    -q '(.comments // []|map(select(.viewerDidAuthor != true))) as $c|[(.reviews|length|tostring),($c|length|tostring),(([(.reviews[]?.submittedAt),($c[]?.createdAt)]|map(select(. != null and . != ""))|max) // "")]|join(" ")'
+8 1 2026-08-04T23:42:03Z
+```
+
+Both halves move together, which is the point: excluding a comment from the count while letting it still set the instant would change the reported line and wake firstmate anyway.
+The comparison is `!= true` rather than `== false`, so a `viewerDidAuthor` that stops being reported counts the comment instead of silently suppressing it - a field that disappears must cost an extra wake, never a missed one.
 
 ## Why the counts move but the wake does not repeat
 

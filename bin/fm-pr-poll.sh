@@ -13,7 +13,10 @@
 #     merged result is reported alone so its existing retirement stays exact.
 #   review-activity reviews=<n> comments=<n> latest=<iso8601>
 #     GitHub only. The pull request's current review-activity totals and the
-#     newest activity instant, as a stateless observation of right now.
+#     newest activity instant, as a stateless observation of right now, counting
+#     only what someone else did: a comment firstmate itself posted is excluded,
+#     because waking firstmate to tell it about its own comment is exactly the
+#     cry-wolf noise the cursor below exists to prevent.
 #     Suppressing an unchanged repeat is deliberately NOT this program's job:
 #     the watcher treats every non-empty check output as actionable, so it owns
 #     the per-task cursor (bin/fm-pr-lib.sh's fm_pr_activity_filter). A check is
@@ -98,8 +101,18 @@ case "$provider" in
     # the COMMENTED review GitHub creates for a standalone inline comment or a
     # reply in an existing review thread, and its comments field carries the
     # pull request's issue comments.
+    # A comment firstmate itself posted is not news it needs waking for, so
+    # viewerDidAuthor drops it from the count AND from the instant: excluding it
+    # from only one of the two would let firstmate's own comment move the marker
+    # and wake firstmate about itself. The test is "!= true" rather than
+    # "== false" so a field that stops being reported counts the comment instead
+    # of silently suppressing it. Reviews carry no such field (their keys are
+    # recorded in the verification record below), so a review stays counted
+    # whoever submitted it; comparing author logins instead would put a remote
+    # string in the decision, which this deliberately does not do.
+    # shellcheck disable=SC2016 # $c is a jq binding, and must not expand here.
     activity=$(gh pr view "$url" --json reviews,comments \
-      -q '[(.reviews|length|tostring),(.comments|length|tostring),(([(.reviews[]?.submittedAt),(.comments[]?.createdAt)]|map(select(. != null and . != ""))|max) // "")]|join(" ")' \
+      -q '(.comments // []|map(select(.viewerDidAuthor != true))) as $c|[(.reviews|length|tostring),($c|length|tostring),(([(.reviews[]?.submittedAt),($c[]?.createdAt)]|map(select(. != null and . != ""))|max) // "")]|join(" ")' \
       2>/dev/null) || exit 0
     reviews=${activity%% *}
     rest=${activity#* }

@@ -714,13 +714,17 @@ fm_pr_activity_commit() {
 }
 
 # Drop the cursor so the next reported activity is surfaced. Used when arming
-# cannot establish a trustworthy starting point: one extra wake is always
-# preferable to inheriting a stale cursor that could suppress a real one.
+# cannot establish a trustworthy starting point, and when a cursor cannot be
+# written at all: one extra wake is always preferable to inheriting a stale
+# cursor that could suppress a real one, or to leaving behind a cursor the
+# commit above will reject on every sweep from here on.
+# The task id stays validated because the path is task-derived, but the cursor's
+# own file type does not gate the removal: rm unlinks a symlink itself and never
+# follows it, so refusing one would leave in place exactly what this removes.
 fm_pr_activity_cursor_clear() {
   local state=$1 id=$2 cursor
   fm_pr_task_id_valid "$id" || return 1
   cursor=$(fm_pr_activity_cursor_path "$state" "$id") || return 1
-  [ ! -L "$cursor" ] || return 1
   rm -f -- "$cursor"
 }
 
