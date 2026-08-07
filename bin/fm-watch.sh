@@ -40,7 +40,11 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
-#   check: <script>: <out> authenticated check output, always actionable
+#   check: <script>: <out> authenticated check output, always actionable. A PR
+#                          poll's review-activity line is the one output first
+#                          filtered against its per-task cursor, because it
+#                          reports current activity on every sweep rather than a
+#                          terminal event; see bin/fm-pr-lib.sh.
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -827,6 +831,14 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+          # The poll reports review activity as a stateless observation of the
+          # pull request right now, so an unanswered review comment would
+          # otherwise wake firstmate once per sweep forever: check output is
+          # always actionable and nothing else suppresses a repeat. The cursor
+          # lives here because the validated poll invocation deliberately
+          # carries no task identity. A merged line is never filtered.
+          fm_pr_activity_filter "$STATE" "$id" "$out"
+          out=$FM_PR_ACTIVITY_SURFACE
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
@@ -848,6 +860,12 @@ while :; do
           else
             triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
           fi
+        fi
+        if [ "$is_pr_poll" -eq 1 ]; then
+          # After the durable append, never before it: a failure here costs a
+          # repeated wake on the next sweep, never a swallowed one.
+          fm_pr_activity_commit "$STATE" "$id" \
+            || triage_log "PR review-activity cursor could not be recorded for $id"
         fi
         touch "$STATE/.last-check"
         wake "$reason"

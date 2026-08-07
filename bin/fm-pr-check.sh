@@ -78,6 +78,20 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
+# Seed the review-activity cursor from the poll itself, so only activity that
+# arrives after arming wakes firstmate rather than every bot comment a pull
+# request already carries by the time its checks go green. The poll owns the
+# query; this only stores what it reports right now. When it reports no usable
+# starting point the cursor is cleared instead of inherited, because one extra
+# wake is always preferable to a stale cursor suppressing a real one.
+FM_PR_ACTIVITY_PENDING=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+  "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null || true)
+case "$FM_PR_ACTIVITY_PENDING" in
+  'review-activity '*) fm_pr_activity_commit "$STATE" "$ID" || true ;;
+  *) FM_PR_ACTIVITY_PENDING=; fm_pr_activity_cursor_clear "$STATE" "$ID" || true ;;
+esac
+FM_PR_ACTIVITY_PENDING=
+
 META_TMP=
 pr_check_cleanup() {
   fm_pr_poll_cleanup
