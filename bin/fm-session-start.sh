@@ -639,7 +639,14 @@ for meta in "$STATE"/*.meta; do
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
     fi
   else
-    printf 'endpoint: unknown (no window recorded)\n'
+    tier=$(fm_meta_get "$meta" tier)
+    case "$tier" in
+      latent|attention)
+        current=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true)
+        printf 'endpoint: released (%s)\n' "${current:-state: quarantined · source: latent-manifest}"
+        ;;
+      *) printf 'endpoint: unknown (no window recorded)\n' ;;
+    esac
   fi
 
   status="$STATE/$id.status"

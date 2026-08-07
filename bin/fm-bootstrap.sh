@@ -12,6 +12,7 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
+#                 "LATENT_RECOVERY: quarantined <task-id>",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -79,9 +80,10 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          (PR-check migration, latent transaction recovery, secondmate_sync,
+#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
+#          fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -1023,6 +1025,11 @@ fi
 # runnable. Detect-only sessions never touch state.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
+  for latent_transaction in "$DATA"/*/latent/transaction; do
+    [ -e "$latent_transaction" ] || [ -L "$latent_transaction" ] || continue
+    "$SCRIPT_DIR/fm-latent.sh" recover-all || true
+    break
+  done
   startup_memory_budget_setup
 fi
 
