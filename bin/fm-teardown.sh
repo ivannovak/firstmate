@@ -183,9 +183,34 @@ fm_lock_try_acquire "$TEARDOWN_LIFECYCLE_LOCK" || {
   echo "REFUSED: task $ID is already in a hibernation, resume, spawn, or cleanup transaction." >&2
   exit 1
 }
+TEARDOWN_REACHED_END=0
+# Set the moment teardown commits to changing this task, so the abort message
+# above can never claim "nothing was changed" once something might have been.
+# Deliberately set EARLY: an over-eager flag only makes the message MORE
+# conservative, while a late one would let it overclaim.
+TEARDOWN_ENTERED_DESTRUCTIVE_PHASE=0
+# Releasing the locks is this trap's job; reporting a truthful exit status is the
+# other half of it. Under `set -e` a FATAL abort - sourcing a missing file, such
+# as a backend adapter fm-backend.sh loads lazily - reaches an EXIT trap with $?
+# already 0, and installing any EXIT trap therefore turns that failure into a
+# reported success. No handler-side rescue of $? works, because the status is
+# gone before the handler runs; the only thing the handler can still see is that
+# the script never reached a completion point. So every legitimate termination
+# sets TEARDOWN_REACHED_END first, and a $?=0 arrival without it is an abort.
+# Ordinary refusals are unaffected: they carry their own non-zero $? through.
 teardown_lifecycle_lock_release() {
+  local rc=$?
   [ -z "$TEARDOWN_BACKEND_LOCK" ] || fm_lock_release "$TEARDOWN_BACKEND_LOCK" || true
   fm_lock_release "$TEARDOWN_LIFECYCLE_LOCK" || true
+  if [ "$rc" -eq 0 ] && [ "$TEARDOWN_REACHED_END" -ne 1 ]; then
+    if [ "$TEARDOWN_ENTERED_DESTRUCTIVE_PHASE" -eq 1 ]; then
+      echo "error: teardown aborted after it began changing this task; state may be incomplete - inspect the task before retrying." >&2
+    else
+      echo "error: teardown aborted before completing; nothing was changed - inspect the task before retrying." >&2
+    fi
+    exit 1
+  fi
+  return "$rc"
 }
 trap teardown_lifecycle_lock_release EXIT
 
@@ -388,6 +413,7 @@ remote_secondmate_teardown_locked() {
 }
 
 if remote_secondmate_teardown_locked; then
+  TEARDOWN_REACHED_END=1
   exit 0
 else
   remote_teardown_rc=$?
@@ -460,6 +486,7 @@ case "$LATENT_TIER" in
     "$FM_ROOT/bin/fm-fleet-sync.sh" "$LATENT_PROJECT" || true
     echo "teardown $ID complete (latent merged task)"
     echo "Backlog: $ID just finished from $LATENT_PR. Record it Done, then re-scan queued work whose blockers and date gates cleared."
+    TEARDOWN_REACHED_END=1
     exit 0
     ;;
 esac
@@ -2184,6 +2211,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  TEARDOWN_ENTERED_DESTRUCTIVE_PHASE=1
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
@@ -2279,6 +2307,8 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
+# Every preflight has passed; from here teardown may change the task.
+TEARDOWN_ENTERED_DESTRUCTIVE_PHASE=1
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -2420,3 +2450,4 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder
+TEARDOWN_REACHED_END=1

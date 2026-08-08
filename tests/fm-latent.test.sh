@@ -435,4 +435,28 @@ if git -C "$PROJECT" rev-parse --verify "refs/firstmate/latent/$ID" >/dev/null 2
 fi
 pass "verified merge finalization delegates to teardown and removes the protected generation"
 
+# A fatal shell abort raised AFTER the EXIT trap is installed must still leave a
+# non-zero exit status. Under `set -e`, sourcing a missing file is a fatal abort
+# that reaches an EXIT trap with $? already 0, so an unguarded trap silently
+# converts that failure into a reported success. This matters most here:
+# bin/fm-watch.sh branches on `fm-latent.sh enter`, so a masked 0 would be read
+# as a completed hibernation and the worker treated as released.
+# The trigger is real rather than synthetic - the backend adapter that
+# fm-backend.sh sources lazily is removed from a copied tree.
+make_case fatal-abort-status
+FATAL_ROOT="$CASE/adapterless"
+mkdir -p "$FATAL_ROOT"
+cp -R "$ROOT/bin" "$FATAL_ROOT/bin"
+rm -f "$FATAL_ROOT/bin/backends/tmux.sh"
+set +e
+PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
+  "$FATAL_ROOT/bin/fm-latent.sh" enter "$ID" > "$CASE/fatal.out" 2>&1
+FATAL_RC=$?
+set -e
+grep -q "No such file or directory" "$CASE/fatal.out" \
+  || fail "fatal-abort fixture did not actually trigger the missing-adapter abort: $(cat "$CASE/fatal.out")"
+[ "$FATAL_RC" -ne 0 ] \
+  || fail "fm-latent.sh enter reported success (rc=0) after a fatal abort; bin/fm-watch.sh would read that as a completed hibernation"
+pass "fm-latent.sh preserves a non-zero exit status through its EXIT trap on a fatal abort"
+
 printf 'all latent lifecycle cases passed\n'

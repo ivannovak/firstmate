@@ -56,6 +56,7 @@ LATENT_BACKEND_LOCK=
 LATENT_PRESENTATION_LOCK=
 LATENT_TMP_REF=
 LATENT_RESUME_REF=
+LATENT_REACHED_END=0
 
 latent_die() {
   echo "REFUSED: $*" >&2
@@ -73,6 +74,18 @@ latent_cleanup() {
   [ -z "$LATENT_PRESENTATION_LOCK" ] || fm_lock_release "$LATENT_PRESENTATION_LOCK" || true
   [ -z "$LATENT_BACKEND_LOCK" ] || fm_lock_release "$LATENT_BACKEND_LOCK" || true
   [ -z "$LATENT_TASK_LOCK" ] || fm_lock_release "$LATENT_TASK_LOCK" || true
+  # `return "$rc"` alone cannot make this honest. Under `set -e` a FATAL abort -
+  # sourcing a missing file, such as a backend adapter fm-backend.sh loads
+  # lazily - reaches an EXIT trap with $? already 0, so installing any EXIT trap
+  # turns that failure into a reported success. The status is gone before this
+  # handler runs, so the only surviving evidence is that no subcommand ever
+  # completed. bin/fm-watch.sh branches on `fm-latent.sh enter`, and would
+  # otherwise read such an abort as a released worker and a completed
+  # hibernation. Ordinary refusals carry their own non-zero $? through here.
+  if [ "$rc" -eq 0 ] && [ "$LATENT_REACHED_END" -ne 1 ]; then
+    echo "error: fm-latent.sh aborted before completing; no lifecycle change was recorded." >&2
+    exit 1
+  fi
   return "$rc"
 }
 trap latent_cleanup EXIT
@@ -939,3 +952,4 @@ case "$cmd" in
     exit 2
     ;;
 esac
+LATENT_REACHED_END=1
