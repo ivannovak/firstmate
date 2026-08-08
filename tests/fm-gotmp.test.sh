@@ -57,6 +57,11 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  # fm-session-lock-lib.sh: the tmux adapter sources it at load time. Under
+  # bash 3.2 (the macOS system bash) a `.` that cannot find its file is a
+  # special-builtin failure that exits the whole teardown even from inside the
+  # `|| true` kill call, so an absent sibling here fails only on that platform.
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
@@ -65,6 +70,10 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-update-source-lib.sh: fm-pr-lib.sh sources it unconditionally for the
+  # upstream-contribution refusal enforced at poll arming. This fixture arms no
+  # poll, but the sibling is required for fm-pr-lib.sh to load at all.
+  ln -s "$ROOT/bin/fm-update-source-lib.sh" "$fake/bin/fm-update-source-lib.sh"
   # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
   # it for the relay-activation gate on the promised-public-reply check. Neither
   # does anything in this fixture, which has no .env, but both are real siblings
@@ -135,6 +144,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
+  # fm-session-lock-lib.sh: required sibling of the tmux adapter (see make_fake_root).
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
@@ -142,6 +153,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-update-source-lib.sh: required sibling of fm-pr-lib.sh (see make_fake_root).
+  ln -s "$ROOT/bin/fm-update-source-lib.sh" "$fake/bin/fm-update-source-lib.sh"
   # fm-public-followup-lib.sh (and the fm-x-lib.sh it sources): teardown sources
   # it for the relay-activation gate on the promised-public-reply check. Neither
   # does anything in this fixture, which has no .env, but both are real siblings
