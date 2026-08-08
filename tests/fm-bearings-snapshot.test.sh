@@ -2013,6 +2013,58 @@ EOF
   pass "a readable mate captain hold is counted exactly once in Captain's Call"
 }
 
+# The snapshot bounds each mate home's captain_threads by
+# FM_SNAPSHOT_SECONDMATE_DECISIONS and discloses the drop in that home's own
+# omitted[]. Bearings projects the bounded array, so unless it carries that
+# disclosure forward the captain reads fewer holds than the home reported, with
+# nothing on the page saying rows were dropped - the silent undercount Captain's
+# Call exists to kill, relocated rather than fixed.
+test_mate_captain_thread_cap_is_disclosed() {
+  local home mate fakebin canonical json uncapped i
+  home=$(make_home mate-thread-cap)
+  mate="$TMP_ROOT/mate-thread-cap-home"
+  : > "$home/data/secondmates.md"
+  make_valid_secondmate_home capped "$mate"
+  append_secondmate_registry "$home" capped "$mate"
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 5 ]; do
+      printf -- '- [ ] cap-decision-%s - Choose remediation %s (repo: sample) (kind: captain) (hold: captain choice %s pending) (hold-kind: captain)\n' \
+        "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$mate/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_DECISIONS=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "capped")
+    | (.captain_threads | length) == 2
+      and .counts.captain_threads == 5
+      and (.omitted | any(.surface == "captain_threads" and .count == 3))
+  ' >/dev/null || fail "capped-home fixture did not reproduce the per-home captain_threads bound: $canonical"
+  json=$(FM_SNAPSHOT_SECONDMATE_DECISIONS=2 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | length) == 2
+      and ([.omitted[] | select(.surface | test("captain holds omitted by snapshot per-home bound"))]
+           | length) == 1
+      and (.omitted[] | select(.surface | test("captain holds omitted by snapshot per-home bound"))
+           | (.surface | test("3 of 5")) and (.surface | test("1 home"))
+             and .reveal == "raise FM_SNAPSHOT_SECONDMATE_DECISIONS")
+  ' >/dev/null || fail "bearings hid the per-home captain-hold cap: $json"
+
+  # The control: uncapped, the same fixture must be untouched - every hold shown,
+  # and no disclosure of a drop that did not happen.
+  uncapped=$(run "$home" "$fakebin" --json)
+  printf '%s' "$uncapped" | jq -e '
+    (.decisions_open | length) == 5
+      and ([.omitted[].surface] | any(test("captain holds omitted by snapshot per-home bound")) | not)
+  ' >/dev/null || fail "an uncapped mate home lost holds or gained a spurious cap disclosure: $uncapped"
+  pass "a mate home's snapshot-capped captain holds are disclosed in bearings omitted[]"
+}
+
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -2045,6 +2097,7 @@ test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_troubled_mate_captain_hold_reaches_captains_call
 test_readable_mate_captain_hold_is_counted_once
+test_mate_captain_thread_cap_is_disclosed
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface

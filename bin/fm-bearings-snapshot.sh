@@ -38,6 +38,10 @@
 # always reaches gates, unlike this home's, whose held row is an in_flight row of
 # its own; a mate's is not, so suppressing it would hide it everywhere.
 # Status-sourced decisions stay excluded here; the canonical snapshot keeps them.
+# captain_threads is itself bounded per home by FM_SNAPSHOT_SECONDMATE_DECISIONS, so
+# omitted[] carries the drop each home discloses against the untruncated total it
+# reports. Reading a capped surface is acceptable; reading it silently is not, which
+# is the whole reason these sections stopped reading decisions_open.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
@@ -495,6 +499,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),
         (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
+        # The two sections above read captain_threads, which the snapshot bounds per
+        # home. Take the drop from the disclosure each home itself emits rather than
+        # recomputing it here, so the two layers can never disagree, and name the
+        # untruncated total beside it: those sections show only what fitted, and a
+        # captain hold that fell off the end must not vanish without a marker.
+        (([ ($snap.secondmate_current.records // [])[]
+            | {dropped:([ (.omitted // [])[] | select(.surface == "captain_threads") | .count ] | add // 0),
+               total:(.counts.captain_threads // 0)}
+            | select(.dropped > 0) ]) as $capped
+         | if ($capped | length) > 0 then
+             {surface:("secondmate captain holds omitted by snapshot per-home bound: \([$capped[].dropped] | add) of \([$capped[].total] | add) across \($capped | length) home(s)"),
+              reveal:"raise FM_SNAPSHOT_SECONDMATE_DECISIONS"}
+           else empty end),
         (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
         (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
         (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),

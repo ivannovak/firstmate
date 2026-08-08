@@ -47,6 +47,8 @@ The projection remains read-only and does not inspect historical prose.
 
 Bearings and the captain fleet board read the same live captain-owned set and then partition it differently on purpose, so their headline numbers are not meant to match.
 Bearings splits it, actionable into Captain's Call and blocked into gates; the board keeps both in its needs-you column and marks the blocked ones unanswerable.
+They also diverge under the snapshot's per-home bound on `captain_threads`: the board folds the holds it could not list into its headline needs-you total, while Bearings leaves its sections at what fitted and discloses the drop in `omitted`.
+Neither is undercounting silently, which is the only property both surfaces owe the captain.
 Each script's header owns its own column contract.
 
 ## Verification record
@@ -103,12 +105,14 @@ ALL 71 TEST SCRIPTS PASSED
 ```
 
 The 2026-08-08 entry covers only the secondmate side of the Captain's Call partition.
-Both fixtures were watched failing first: the troubled-home case reported an empty `decisions_open` and an empty `gates` against a snapshot already reporting one `captain_threads` row, and the readable-home control was re-run with the id dedupe replaced by an identity so a genuine double count was observed being caught on both sections.
+All three fixtures were watched failing first: the troubled-home case reported an empty `decisions_open` and an empty `gates` against a snapshot already reporting one `captain_threads` row, the readable-home control was re-run with the id dedupe replaced by an identity so a genuine double count was observed being caught on both sections, and the capped-home case reported two decisions with no drop marker at all against a snapshot already reporting three of five holds omitted.
+The cap fixture was then proven non-vacuous from both directions: dropping the "only when something was dropped" guard made the uncapped control fail on a spurious marker, and reporting the bounded array length as the total made the capped case fail on `3 of 2`.
 
 ```text
 $ bash tests/fm-bearings-snapshot.test.sh
 ok - a captain hold inside a troubled mate home still reaches Captain's Call
 ok - a readable mate captain hold is counted exactly once in Captain's Call
+ok - a mate home's snapshot-capped captain holds are disclosed in bearings omitted[]
 
 $ bin/fm-lint.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
