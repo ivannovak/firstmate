@@ -32,6 +32,15 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Captain fleet board (config/fleet-board)
+
+The captain-facing fleet board is off until this home opts in by creating the local, gitignored `config/fleet-board` file; its contents are ignored and only its presence matters.
+While it is present, the watcher's poll loop asks [`bin/fm-fleet-board.sh`](../bin/fm-fleet-board.sh) to refresh the board on every cycle, and that script decides whether a rebuild is actually owed by fingerprinting the authoritative inputs rather than by elapsed time.
+An unchanged fleet costs a few stat calls and one small hash; a changed one hands the expensive rebuild to a detached single-flight child so supervision never waits on it.
+Nothing about the board can affect supervision: the watcher discards its result, because a read surface must not be able to stop the watcher.
+The board itself is written to `state/fleet-board.html`, alongside the `state/.fleet-board.*` fingerprint, model, and rebuild-lock records; every one of them is derived and safe to delete.
+That script's header is the single owner of the column contract, the age derivation, the staleness presentation, and the tailnet-only publishing rules.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

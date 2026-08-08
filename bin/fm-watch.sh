@@ -62,6 +62,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -793,6 +794,19 @@ while :; do
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+
+  # Captain-facing fleet board, refreshed on real state change rather than on a
+  # timer. The watcher poll IS the change signal, so this runs every cycle, but
+  # bin/fm-fleet-board.sh only pays for a rebuild when its cheap input
+  # fingerprint moved; an unchanged fleet costs a few stat calls and one small
+  # hash. A rebuild that IS due is handed to a detached single-flight child, so
+  # this loop never waits minutes on a snapshot and never stacks rebuilds.
+  # Inert until the captain opts in by creating config/fleet-board, and never
+  # able to affect supervision: a board failure is swallowed here because a read
+  # surface must not be able to stop the watcher.
+  if [ -e "$CONFIG/fleet-board" ]; then
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-fleet-board.sh" refresh --detach >/dev/null 2>&1 || true
+  fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
