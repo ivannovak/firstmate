@@ -42,6 +42,9 @@ A second mate whose home is on another machine still appears on the board, but a
 Every registered mate home is local today, so this is a disclosed limit on a future arrangement rather than a live gap, and the rendered board says the same thing in its own footer.
 Nothing about the board can affect supervision: the watcher discards its result, because a read surface must not be able to stop the watcher.
 The board itself is written to `state/fleet-board.html`, alongside the `state/.fleet-board.*` fingerprint, model, and rebuild-lock records; every one of them is derived and safe to delete.
+Publishing is a separate explicit step rather than part of the opt-in: `bin/fm-fleet-board.sh serve` stages the rendered board alone in `state/.fleet-board-web/`, serves that directory from a loopback-bound local server recorded in `state/.fleet-board.server.pid`, and points Tailscale at that loopback address.
+`bin/fm-fleet-board.sh status` reports the board's age, whether its inputs have moved, and the current serve configuration, while `unserve` withdraws the published board and stops that local server.
+Creating `config/fleet-board` only keeps the board rebuilt; on its own it publishes nothing.
 That script's header is the single owner of the column contract, the age derivation, the staleness presentation, and the tailnet-only publishing rules.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)

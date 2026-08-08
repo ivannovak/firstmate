@@ -31,10 +31,14 @@ A failed intermediate step leaves the hold open.
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
-It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies only an unblocked captain hold as actionable.
-Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked captain holds as queued work in the owning home.
+It resolves every repeated `blocked-by:` edge against structured Done records and keeps missing blockers unresolved.
+Its `captain_held` predicate turns on the hold rather than the item's shape, so any live row carrying a captain hold qualifies whatever its state or kind, because most decisions arise mid-task rather than as a queued decision record.
+`captain_actionable` narrows that set to the rows with no unresolved blocker and keeps its documented "actionable" meaning.
+Its secondmate-home summary carries the whole live set as `captain_threads`, each row flagged actionable or blocked with what blocks it, and classifies a home with an actionable captain hold as `captain_decision`.
+`captain_threads` survives the drop to the untrusted parent-event fallback whenever the home's own summary was readable, with its untruncated count and drop disclosure, because a captain hold is a backlog fact that does not depend on reconciling live child metadata.
+A reader that must not undercount what awaits the captain therefore reads `captain_threads` rather than reassembling it from the other surfaces, and the script header owns the exact field semantics and bounds.
 
-`bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open` and leaves blocked captain holds in ordinary queued gates.
+`bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open` and leaves blocked captain holds in ordinary queued gates, except one whose own worker is still running, which appears only in the `in_flight` projection.
 It excludes completed kind `captain` records from Recently Landed.
 The projection remains read-only and does not inspect historical prose.
 
