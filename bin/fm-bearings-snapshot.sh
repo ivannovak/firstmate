@@ -63,6 +63,8 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-branch-lib.sh
+. "$SCRIPT_DIR/fm-branch-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -232,11 +234,16 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
+      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --arg prefix "$FM_BRANCH_PREFIX" --arg legacy_prefix "$FM_BRANCH_LEGACY_PREFIX" --arg unticketed "$FM_BRANCH_UNTICKETED_MARKER" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
         [ .[] | {
           num:(.number|tostring),
           repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
+          task:(
+            if (.headRefName // "" | startswith($prefix)) then
+              (.headRefName | ltrimstr($prefix)) as $slug
+              | if ($slug | startswith($unticketed)) then ($slug | ltrimstr($unticketed)) else $slug end
+            elif (.headRefName // "" | startswith($legacy_prefix)) then (.headRefName | ltrimstr($legacy_prefix))
+            else "-" end),
           url:(.url // "-"),
           review:(.reviewDecision // "none"),
           mergeable:(.mergeable // "UNKNOWN"),
