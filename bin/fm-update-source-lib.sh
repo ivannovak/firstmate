@@ -69,6 +69,11 @@ fm_update_source_config_value() { # <config-dir> <file-name>
 # then "origin". Returns 1 with FM_UPDATE_SOURCE_ERROR set and the value cleared
 # when a configured name is unsafe, so a caller refuses rather than silently
 # falling back to a different source.
+# These three are this file's OUTPUT variables: assigned here, read by the
+# callers that source it (bin/fm-update.sh, bin/fm-absorb-upstream.sh,
+# bin/fm-remote-secondmate-control.sh, bin/fm-pr-check.sh). ShellCheck sees
+# only this file when it is linted as its own root, so the cross-file read is
+# invisible to it here.
 FM_UPDATE_SOURCE_REMOTE=""
 FM_UPDATE_SOURCE_ERROR=""
 fm_update_source_remote_var() { # [config-dir]
@@ -80,13 +85,16 @@ fm_update_source_remote_var() { # [config-dir]
     value=$(fm_update_source_config_value "$dir" update-remote)
   fi
   if [ -z "$value" ]; then
+    # shellcheck disable=SC2034 # Output variable read by callers; see the note above.
     FM_UPDATE_SOURCE_REMOTE=origin
     return 0
   fi
   if ! fm_update_source_remote_name_safe "$value"; then
+    # shellcheck disable=SC2034 # Output variable read by callers; see the note above.
     FM_UPDATE_SOURCE_ERROR="update source is not a safe git remote name"
     return 1
   fi
+  # shellcheck disable=SC2034 # Output variable read by callers; see the note above.
   FM_UPDATE_SOURCE_REMOTE=$value
 }
 
@@ -106,9 +114,11 @@ fm_upstream_contribution_remote_var() { # [config-dir]
   fi
   [ -n "$value" ] || return 0
   if ! fm_update_source_remote_name_safe "$value"; then
+    # shellcheck disable=SC2034 # Output variable read by callers; see the note above.
     FM_UPDATE_SOURCE_ERROR="upstream contribution target is not a safe git remote name"
     return 1
   fi
+  # shellcheck disable=SC2034 # Output variable read by callers; see the note above.
   FM_UPSTREAM_CONTRIBUTION_REMOTE=$value
 }
 
