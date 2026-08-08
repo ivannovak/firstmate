@@ -169,8 +169,8 @@ The shell scripts validate the JSON shape and verified harness/effort combinatio
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
-Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, and muse while preserving the requested profile for later audit.
+A requested effort is either delivered to the selected harness's launch or refused by `fm-spawn.sh` before endpoint creation and task metadata; it is never silently omitted from the launch while meta claims it applied.
+Codex effort support is model-specific and resolved from its live model catalog at spawn time; when the catalog or exact model cannot be verified, `fm-spawn.sh` warns and passes the requested value through for Codex itself to validate.
 
 ## Optional secondmates
 
