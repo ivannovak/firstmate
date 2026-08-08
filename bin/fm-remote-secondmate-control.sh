@@ -46,6 +46,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-update-source-lib.sh
+. "$SCRIPT_DIR/fm-update-source-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -242,11 +244,23 @@ cmd_sync() {
 }
 
 cmd_update() {
-  local id=$1 update_out root_status
+  local id=$1 update_out root_status update_remote
   validate_id "$id"
   validate_home "$id"
+  # The code root on this host is shared infrastructure with no home of its own,
+  # so it has no update-source choice to read. The one the PARENT pushed into
+  # this secondmate home's inherited config is the fleet's choice, so carry it
+  # in explicitly rather than letting the code root fall back to its own origin.
+  # Read from the home rather than taken as a new argument on purpose: this is
+  # the command that updates the remote code root, so a parent that passed an
+  # argument an older root could not parse would deadlock the very update that
+  # would teach it. A host that has not received the inherited choice yet keeps
+  # using origin until the next convergence carries it.
+  fm_update_source_remote_var "$TARGET_HOME/config" \
+    || die "remote secondmate home has an unusable update source: $FM_UPDATE_SOURCE_ERROR"
+  update_remote=$FM_UPDATE_SOURCE_REMOTE
   if ! update_out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
-    "$SCRIPT_DIR/fm-update.sh" 2>&1); then
+    FM_UPDATE_REMOTE="$update_remote" "$SCRIPT_DIR/fm-update.sh" 2>&1); then
     [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
     die "remote code root update failed"
   fi
@@ -255,7 +269,7 @@ cmd_update() {
     'firstmate: updated '*|'firstmate: already current'*) ;;
     *)
       [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
-      die "remote code root did not complete a safe origin update"
+      die "remote code root did not complete a safe update from $update_remote"
       ;;
   esac
   cmd_sync "$id"

@@ -298,8 +298,9 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
-`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
-For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
+`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from this fleet's configured update source, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+That source may be a fork rather than the open-source project, so a change is usable as soon as it lands there; [`docs/configuration.md`](configuration.md) owns the configuration and `bin/fm-absorb-upstream.sh` owns the separate, equally fast-forward-only path that takes upstream's work back in.
+For a remote route, the configured code root updates from that same source on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).

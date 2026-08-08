@@ -17,12 +17,22 @@
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
 #     re-processed as one of its own secondmates.
+#   - The update SOURCE is configurable: a home that names its own remote follows
+#     that remote for itself and every secondmate, a home that names none still
+#     follows origin, a named remote the checkout lacks is skipped rather than
+#     silently swapped, and an unusable name refuses the run before anything
+#     moves. Fast-forward-only holds identically under a configured source.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 UPDATE="$ROOT/bin/fm-update.sh"
+
+# The shared fast-forward helper, for the one contract below that is about the
+# library's own fetch behavior rather than about a whole update run.
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -58,6 +68,46 @@ new_world() {
   printf '%s\n' "$w"
 }
 
+# Give a world a SECOND publishing remote named "fork", seeded from origin's
+# current tip and reachable from the firstmate repo (and therefore from every
+# worktree of it). Nothing consults it until config/update-remote names it, so
+# adding it leaves every origin-sourced test unchanged.
+add_fork_remote() {
+  local w=$1
+  git clone -q --bare "$w/origin.git" "$w/fork.git"
+  git -C "$w/fork.git" symbolic-ref HEAD refs/heads/main
+  git -C "$w/main" remote add fork "$w/fork.git"
+  git clone -q "$w/fork.git" "$w/forkseed"
+}
+
+# Advance the FORK remote by one commit, leaving origin exactly where it was.
+# mode matches bump_origin: instr changes the instruction surface, readme does not.
+bump_fork() {
+  local w=$1 mode=$2
+  git -C "$w/forkseed" pull -q origin main >/dev/null 2>&1 || true
+  printf 'fork-r-%s\n' "$mode" >> "$w/forkseed/README.md"
+  if [ "$mode" = instr ]; then
+    printf 'fork-v2\n' > "$w/forkseed/AGENTS.md"
+    printf 'echo fork\n' > "$w/forkseed/bin/tool.sh"
+    printf 'fork-s2\n' > "$w/forkseed/.agents/skills/note.md"
+  fi
+  git -C "$w/forkseed" add -A
+  git -C "$w/forkseed" commit -qm "fork-bump-$mode"
+  git -C "$w/forkseed" push -q origin main
+}
+
+# Point this home's update source at <remote>.
+set_update_remote() {
+  local w=$1 remote=$2
+  mkdir -p "$w/home/config"
+  printf '%s\n' "$remote" > "$w/home/config/update-remote"
+}
+
+# The commit the fork remote currently publishes on main.
+fork_tip() {
+  git -C "$1/fork.git" rev-parse refs/heads/main
+}
+
 # Add a secondmate home as a DETACHED worktree of the firstmate repo (matching
 # how treehouse leases a secondmate home), plus its state meta. Args: world id.
 add_sm() {
@@ -90,6 +140,19 @@ bump_origin() {
 run_update() {
   local w=$1
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+}
+
+# Same run with stderr folded in, for the refusal cases where the diagnostic and
+# the non-zero exit ARE the behavior. Output goes to a file rather than a command
+# substitution so RUN_RC reaches the caller's shell instead of dying with a
+# subshell (tests/lib.sh documents that boundary).
+RUN_RC=0
+RUN_OUT=""
+run_update_checked() {
+  local w=$1 outfile="$TMP_ROOT/update.out"
+  RUN_RC=0
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" >"$outfile" 2>&1 || RUN_RC=$?
+  RUN_OUT=$(cat "$outfile")
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -291,6 +354,154 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- T12: a configured update source, not origin, is what the fleet follows --
+# The whole point of the configurable: a commit that lands ONLY on the fork
+# reaches this home and its secondmate, with no dependency on origin ever
+# carrying it. Origin is deliberately left behind here, so an assertion that
+# the targets moved is an assertion that they followed the fork.
+test_configured_update_source_reaches_the_fleet() {
+  local w out fork_rev origin_rev
+  w=$(new_world t12)
+  add_fork_remote "$w"
+  add_sm "$w" sm1
+  set_update_remote "$w" fork
+  bump_fork "$w" instr
+
+  out=$(run_update "$w")
+  fork_rev=$(fork_tip "$w")
+  origin_rev=$(git -C "$w/origin.git" rev-parse refs/heads/main)
+
+  assert_contains "$out" "update-source: fork" "the source actually used is reported"
+  assert_contains "$out" "firstmate: updated " "firstmate advanced from the fork"
+  assert_contains "$out" "secondmate sm1: updated " "secondmate advanced from the fork"
+  assert_contains "$out" "reread-firstmate: yes" "fork instruction change triggers reread"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$fork_rev" ] \
+    || fail "firstmate HEAD is not at the fork tip"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$fork_rev" ] \
+    || fail "secondmate HEAD is not at the fork tip"
+  [ "$fork_rev" != "$origin_rev" ] \
+    || fail "fixture did not diverge fork from origin, so the source is unproven"
+  # The commit is in the working tree, not just the ref.
+  grep -q 'fork-v2' "$w/main/AGENTS.md" || fail "fork content did not land in the checkout"
+  # Origin was never advanced by this run, and was never even fetched: its
+  # remote-tracking ref still points at the pre-fork commit.
+  [ "$(git -C "$w/main" rev-parse refs/remotes/origin/main)" = "$origin_rev" ] \
+    || fail "origin remote-tracking ref moved during a fork-sourced update"
+  pass "T12 a configured update source carries a fork-only commit to the whole fleet"
+}
+
+# --- T13: fast-forward-only survives the source change ----------------------
+# The safety property is not weakened by making the source configurable: a home
+# holding its own commit is skipped and reported against the CONFIGURED base,
+# and its unlanded work is left exactly where it was.
+test_diverged_secondmate_skipped_on_configured_source() {
+  local w out before
+  w=$(new_world t13)
+  add_fork_remote "$w"
+  add_sm "$w" sm1
+  set_update_remote "$w" fork
+  printf 'unlanded secondmate work\n' > "$w/sm1/AGENTS.md"
+  git -C "$w/sm1" add -A
+  git -C "$w/sm1" commit -qm local-work
+  before=$(git -C "$w/sm1" rev-parse HEAD)
+  bump_fork "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: skipped: diverged from fork/main" \
+    "diverged home is skipped against the configured base"
+  assert_not_contains "$out" "fm-sm1" "skipped secondmate is not nudged"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before" ] \
+    || fail "diverged secondmate HEAD moved (unlanded work at risk)"
+  grep -q 'unlanded secondmate work' "$w/sm1/AGENTS.md" \
+    || fail "unlanded secondmate work was discarded"
+  pass "T13 fast-forward-only still refuses a diverged home under a configured source"
+}
+
+# --- T14: a source the target does not have is skipped, never guessed -------
+test_missing_configured_remote_is_skipped() {
+  local w out before
+  w=$(new_world t14)
+  add_sm "$w" sm1
+  set_update_remote "$w" fork   # deliberately never added to this world
+  before=$(git -C "$w/main" rev-parse HEAD)
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "update-source: fork" "the configured source is still reported"
+  assert_contains "$out" "firstmate: skipped: no fork remote" "missing remote is named"
+  assert_contains "$out" "secondmate sm1: skipped: no fork remote" "secondmate reports the same"
+  assert_contains "$out" "nudge-secondmates: none" "nothing advanced, nothing nudged"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "firstmate advanced from a remote it was not told to use"
+  pass "T14 a configured source the checkout lacks is skipped, never silently swapped"
+}
+
+# --- T15: an unusable configured value refuses the whole run ----------------
+# Silently falling back to origin would move the entire fleet to a source the
+# operator did not name, so the run stops before any target is touched.
+test_unsafe_configured_remote_refuses_before_touching_anything() {
+  local w before
+  w=$(new_world t15)
+  add_sm "$w" sm1
+  set_update_remote "$w" '--upload-pack=evil'
+  before=$(git -C "$w/main" rev-parse HEAD)
+  bump_origin "$w" instr
+
+  run_update_checked "$w"
+
+  [ "$RUN_RC" -ne 0 ] || fail "an unusable update source exited 0"
+  assert_contains "$RUN_OUT" "not a safe git remote name" "the refusal names the problem"
+  assert_not_contains "$RUN_OUT" "firstmate: updated" "nothing was advanced"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "firstmate advanced despite an unusable configured source"
+  pass "T15 an unusable configured source refuses the run instead of falling back"
+}
+
+# --- T16: the environment override reaches the same resolution --------------
+# This is the path bin/fm-remote-secondmate-control.sh uses to carry the fleet's
+# choice into a remote code root that has no home config of its own.
+test_environment_override_selects_the_source() {
+  local w out fork_rev
+  w=$(new_world t16)
+  add_fork_remote "$w"
+  bump_fork "$w" instr
+
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" FM_UPDATE_REMOTE=fork "$UPDATE" 2>/dev/null)
+  fork_rev=$(fork_tip "$w")
+
+  assert_contains "$out" "update-source: fork" "the override is reported as the source"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$fork_rev" ] \
+    || fail "the environment override did not select the fork"
+  pass "T16 FM_UPDATE_REMOTE selects the source for a checkout with no home config"
+}
+
+# --- T17: one object store, two sources, both actually fetched -------------
+# The helper fetches each object store at most once so a fleet of worktrees
+# costs one network round trip. Once the SOURCE is a parameter, that saving must
+# be per source: fetching one remote does not refresh another, so a second
+# source asked for on the same object store must still be fetched.
+test_fetch_is_deduped_per_source_not_per_object_store() {
+  local w origin_before fork_before
+  w=$(new_world t17)
+  add_fork_remote "$w"
+  bump_origin "$w" instr
+  bump_fork "$w" readme
+  origin_before=$(git -C "$w/main" rev-parse refs/remotes/origin/main)
+  fork_before=$(git -C "$w/main" rev-parse refs/remotes/fork/main)
+
+  FETCHED=""
+  fetch_once "$w/main" origin || fail "fetching origin failed"
+  fetch_once "$w/main" fork || fail "fetching fork failed"
+
+  [ "$(git -C "$w/main" rev-parse refs/remotes/origin/main)" != "$origin_before" ] \
+    || fail "origin was not fetched"
+  [ "$(git -C "$w/main" rev-parse refs/remotes/fork/main)" != "$fork_before" ] \
+    || fail "fork was not fetched after origin (dedup collapsed two sources into one)"
+  pass "T17 fetch dedup is per source, so a second source on one object store still refreshes"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -300,5 +511,11 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_configured_update_source_reaches_the_fleet
+test_diverged_secondmate_skipped_on_configured_source
+test_missing_configured_remote_is_skipped
+test_unsafe_configured_remote_refuses_before_touching_anything
+test_environment_override_selects_the_source
+test_fetch_is_deduped_per_source_not_per_object_store
 
 echo "# all fm-update tests passed"

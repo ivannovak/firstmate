@@ -5,6 +5,8 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# A pull request at this home's configured upstream contribution target is
+# refused rather than armed; see the check below for why.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -12,9 +14,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-update-source-lib.sh
+. "$SCRIPT_DIR/fm-update-source-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -54,6 +59,37 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
+fi
+
+# A pull request opened AT the upstream open-source project this home
+# contributes to is fire-and-forget: this fleet has no merge authority there,
+# nothing downstream waits on it, and arming a poll would only produce recurring
+# wakes for a decision someone else makes on their own schedule. Refuse to arm
+# it, and say which pull request should have been recorded instead.
+# A home with no upstream configured never reaches this check at all, so the
+# default behavior is unchanged.
+# The check acts only on a POSITIVE identity match. A configured remote that
+# cannot be resolved to a forge identity - a missing remote, a local-path URL -
+# leaves it unable to judge, and it warns and continues rather than blocking
+# every unrelated project's merge poll on this home's own contribution setting.
+fm_upstream_contribution_remote_var "$CONFIG" || {
+  echo "error: $FM_UPDATE_SOURCE_ERROR" >&2
+  exit 1
+}
+UPSTREAM_REMOTE=$FM_UPSTREAM_CONTRIBUTION_REMOTE
+if [ -n "$UPSTREAM_REMOTE" ]; then
+  if UPSTREAM_ID=$(fm_update_source_remote_identity "$FM_ROOT" "$UPSTREAM_REMOTE"); then
+    PR_ID=$(printf '%s\t%s\n' \
+      "$(printf '%s' "$HOST" | tr '[:upper:]' '[:lower:]')" \
+      "$(printf '%s' "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]')")
+    if [ "$PR_ID" = "$UPSTREAM_ID" ]; then
+      echo "error: $URL is a contribution to the upstream project ($UPSTREAM_REMOTE); upstream pull requests are not waited on" >&2
+      echo "record the pull request on this fleet's own update source instead" >&2
+      exit 1
+    fi
+  else
+    echo "warning: upstream contribution remote '$UPSTREAM_REMOTE' has no resolvable forge identity; not checking this PR against it" >&2
+  fi
 fi
 
 # Neutralize any pre-fix poll before recording or arming this task. The

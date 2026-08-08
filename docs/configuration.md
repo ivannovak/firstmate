@@ -24,6 +24,34 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Self-update source and upstream contributions (config/update-remote / config/upstream-remote)
+
+Firstmate is a shared template, and a home may run from its own fork of it rather than from the open-source project.
+Two local, gitignored files under the effective home's `config/` name the git remotes involved, and both hold a remote NAME rather than a URL, so the address stays in git's own remote configuration where `git remote -v` can show it and no captain's fork address is ever written into tracked material.
+
+`config/update-remote` names the remote every home in this fleet fast-forwards its own tracked files from.
+Absent means `origin`, which is exactly what a home with no configuration has always used, so an unconfigured install is unchanged.
+`bin/fm-update.sh` reports the resolved remote as its `update-source:` line and refuses the whole run rather than falling back when the configured name is unusable, because silently reverting to `origin` would move an entire fleet to a source nobody chose.
+The primary home propagates this file to every secondmate home as inherited local material (`bin/fm-config-inherit-lib.sh`), so the fleet self-updates from one source; a remote route carries the same resolved choice into that host's shared code root, which has no home configuration of its own.
+A target whose checkout has no such remote is skipped and reported by name, exactly like any other target that cannot cleanly fast-forward.
+
+`config/upstream-remote` names the upstream open-source project this fork contributes back to.
+It has no default: a home that names none has no upstream, and every upstream-specific behavior below stays inert.
+It is deliberately not inherited by secondmate homes, because only the home that ships firstmate's tracked material has an upstream to name.
+
+Setting the two depends on how the home's remotes are already arranged, and both arrangements work:
+
+- `origin` already points at the fork, with a second remote for the open-source project: leave `update-remote` absent and set `upstream-remote` to that second remote's name.
+  This is the arrangement to prefer for a home that runs its own fork, because the update source needs no configuration at all and the pull request a gate opens against `origin` lands on the fork, where its own captain holds merge authority.
+  It is deliberately the mirror image of the contributor arrangement in [`CONTRIBUTING.md`](../CONTRIBUTING.md), which points `origin` at the open-source project precisely so a contribution's pull request opens there; the two are different jobs, not a disagreement.
+- `origin` points at the open-source project, with a second remote for the fork: set `update-remote` to the fork's remote name and `upstream-remote` to `origin`.
+  A home arranged for contributing that also wants to run from its fork uses this one, and its gate keeps opening pull requests at the open-source project, which `bin/fm-pr-check.sh` then refuses to wait on.
+
+Two behaviors follow from a configured upstream.
+`bin/fm-absorb-upstream.sh` is the separate, deliberate path that pulls the upstream project's work into the fork; it is fast-forward-only, never writes to the upstream remote, and reports genuine divergence with its ahead/behind counts instead of reconciling it.
+`bin/fm-pr-check.sh` refuses to arm a merge poll for a pull request at that upstream, because nobody in this fleet can merge it and waiting on it would only produce recurring wakes; a pull request anywhere else is unaffected.
+`AGENTS.md` section 12 owns the operating model those two behaviors serve.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
@@ -186,7 +214,7 @@ Each seed writes an `.fm-secondmate-home` identity marker at the home root, alon
 The tracked root `.gitignore` ignores both markers, so validation can read them without making a freshly seeded home appear dirty to porcelain-based safety checks.
 This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
-A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
+A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s update-source refresh instead.
 
 ## FM_HOME
 

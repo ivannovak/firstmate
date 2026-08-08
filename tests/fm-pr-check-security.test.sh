@@ -513,6 +513,73 @@ test_invalid_entrypoints_have_zero_side_effects() {
   pass "PR and teardown entrypoints reject invalid arguments before every side effect"
 }
 
+# A pull request opened AT the upstream project this home contributes to is
+# fire-and-forget: nobody here can merge it, so arming a poll would only produce
+# recurring wakes forever. It must arm nothing and leave no trace, while a pull
+# request on this fleet's own source still arms exactly as before.
+test_upstream_contribution_pr_arms_nothing() {
+  local dir before rc url
+  dir=$(make_case upstream-contribution)
+  write_task_meta "$dir" task-a
+  write_task_meta "$dir" task-b
+  git init -q "$dir/root"
+  printf 'upstream\n' > "$dir/home/config/upstream-remote"
+
+  # The same upstream repository, written the three ways a git remote URL is
+  # actually spelled, including a different letter case.
+  for url in \
+    'https://github.com/upstream-org/firstmate.git' \
+    'git@github.com:Upstream-Org/FirstMate.git' \
+    'ssh://git@github.com/upstream-org/firstmate'; do
+    git -C "$dir/root" remote remove upstream >/dev/null 2>&1 || true
+    git -C "$dir/root" remote add upstream "$url"
+    before=$(state_snapshot "$dir/home/state")
+    set +e
+    run_check_entry "$dir" task-a https://github.com/upstream-org/firstmate/pull/12 \
+      > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "an upstream contribution PR was accepted for '$url'"
+    assert_contains "$(cat "$dir/stderr")" "upstream pull requests are not waited on" \
+      "the refusal explains why for '$url'"
+    [ "$(state_snapshot "$dir/home/state")" = "$before" ] \
+      || fail "refusing an upstream PR still changed state for '$url'"
+  done
+
+  # A pull request anywhere else - including this fleet's own source - is
+  # unaffected and arms normally.
+  run_check_entry "$dir" task-a https://github.com/captain/firstmate/pull/7 \
+    >/dev/null 2>/dev/null || fail "a non-upstream PR was refused"
+  [ -f "$dir/home/state/task-a.check.sh" ] || fail "a non-upstream PR did not arm its poll"
+  grep -qxF 'pr=https://github.com/captain/firstmate/pull/7' "$dir/home/state/task-a.meta" \
+    || fail "a non-upstream PR was not recorded"
+
+  # An unusable upstream remote NAME is a refusal, not a silent loss of the check.
+  printf -- '--upload-pack=evil\n' > "$dir/home/config/upstream-remote"
+  set +e
+  run_check_entry "$dir" task-b https://github.com/captain/firstmate/pull/8 \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unsafe upstream remote name was accepted"
+  assert_contains "$(cat "$dir/stderr")" "not a safe git remote name" \
+    "the unsafe upstream remote name is named"
+
+  # A configured remote with no resolvable forge identity cannot judge the PR.
+  # It warns and still arms, so one home's contribution setting never blocks an
+  # unrelated project's merge poll.
+  printf 'upstream\n' > "$dir/home/config/upstream-remote"
+  git -C "$dir/root" remote remove upstream
+  git -C "$dir/root" remote add upstream "$dir/not-a-forge"
+  run_check_entry "$dir" task-b https://github.com/captain/firstmate/pull/8 \
+    >/dev/null 2> "$dir/stderr" || fail "an unresolvable upstream identity blocked an unrelated PR"
+  assert_contains "$(cat "$dir/stderr")" "no resolvable forge identity" \
+    "the unresolvable upstream identity is reported"
+  [ -f "$dir/home/state/task-b.check.sh" ] || fail "the unrelated PR did not arm its poll"
+
+  pass "upstream contribution PRs arm nothing; every other PR is unaffected"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -3335,6 +3402,7 @@ test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
+test_upstream_contribution_pr_arms_nothing
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
