@@ -55,6 +55,14 @@ No poll is armed for a pull request at that upstream, because nobody in this fle
 That refusal lives in the shared arming primitive in `bin/fm-pr-lib.sh` that every armed poll passes through, so `bin/fm-pr-check.sh` and the rebuild paths in `bin/fm-pr-check-migrate.sh` are all covered; the migration reports such a task as `upstream contribution poll quarantined and left unarmed` rather than as a repair it failed to make.
 It acts only on a positive repository-identity match (host plus project path, case-insensitive), never on the provider and never on an upstream it cannot resolve, because suppressing more than that one repository would silently stop merge wakes the fleet depends on.
 `AGENTS.md` section 12 owns the operating model those two behaviors serve.
+## Latent finished workers (config/latent-workers)
+
+An absent `config/latent-workers` file or the exact value `on` enables automatic eligibility attempts when a finished worker reports its PR-ready result.
+The exact value `off` disables automatic attempts for that home, while `bin/fm-latent.sh enter <task-id>` remains available as an explicit operation.
+An unreadable or unrecognized value disables automatic attempts rather than guessing.
+This local gitignored preference is per home and is not inherited into secondmate homes.
+Eligibility itself is not configurable: GitHub-only exact PR identity, protected-ref ancestry, cleanliness, decision and obligation absence, inactive validation, endpoint termination, and post-termination rechecks always apply.
+`docs/architecture.md` owns the state-machine and recovery rationale, and `bin/fm-latent.sh`'s header owns commands and private record mechanics.
 
 ## Pi Calm preference (config/calm)
 

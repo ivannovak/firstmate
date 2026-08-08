@@ -11,6 +11,16 @@
 #   merged
 #     the pull request or merge request is merged. Terminal and exclusive: a
 #     merged result is reported alone so its existing retirement stays exact.
+#   closed-unmerged
+#     the pull request was closed without merging. Reported only for a task that
+#     supplied an expected head, because that is what distinguishes a lifecycle
+#     transition worth waking for from an ordinary closed PR nobody is waiting on.
+#   head-changed:<oid>
+#     the pull request's head moved away from the expected head.
+#   changes-requested:<oid>
+#     the review decision became CHANGES_REQUESTED when it previously was not.
+#     These three are what a hibernating worker is woken by; bin/fm-latent.sh
+#     owns what each transition means for its lifecycle.
 #   review-activity reviews=<n> comments=<n> latest=<iso8601>
 #     GitHub only. The pull request's current review-activity totals and the
 #     newest activity instant, as a stateless observation of right now, counting
@@ -34,16 +44,32 @@
 # review comment including a thread reply - are established by running the real
 # CLI in docs/verification/pr-review-activity.md. Refresh that record after a gh
 # upgrade: the colocated tests stub gh and cannot notice a real field going away.
+# The state lookup is shared and unchanged; the head/review lookup happens only
+# for a task that supplied an expected head, so a task that is not hibernating
+# makes exactly the calls it always did and cannot be silenced by a field it
+# never needed. A lifecycle transition outranks review activity in the same
+# sweep, and exactly one line is ever printed, because bin/fm-watch.sh matches
+# the whole output.
 set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+expected_head=
+if [ "$#" -eq 8 ] && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
   path=$5
   number=$6
+  expected_head=$7
+  expected_review=$8
+elif [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+  provider=$2
+  url=$3
+  host=$4
+  path=$5
+  number=$6
+  expected_review=
 elif [ "$#" -eq 0 ]; then
   case "$0" in
     *.check.sh) data=${0%.check.sh}.pr-poll ;;
@@ -61,6 +87,7 @@ elif [ "$#" -eq 0 ]; then
     exit 0
   fi
   exec 3<&-
+  expected_review=
 else
   exit 0
 fi
@@ -72,10 +99,13 @@ esac
 case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
+case "$expected_head" in
+  '') ;;
+  *[!0-9a-f]*) exit 0 ;;
+  *) [ "${#expected_head}" -eq 40 ] || [ "${#expected_head}" -eq 64 ] || exit 0 ;;
+esac
+[ -z "$expected_review" ] || [ "$expected_review" = CHANGES_REQUESTED ] || exit 0
 
-# Every component is revalidated here rather than trusted from the sidecar, and
-# the stored URL must then be exactly reconstructible from those components, so
-# a doctored sidecar cannot redirect this poll at another host or project.
 case "$provider" in
   github)
     [ "$host" = github.com ] || exit 0
@@ -90,10 +120,46 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
+    # State first, in its own call and in the shape this poll has always used:
+    # a merge is the one result every task cares about, and keeping this lookup
+    # unchanged means a task that is not hibernating behaves exactly as before.
     state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    # merged stays terminal AND exclusive, so its existing retirement stays exact.
     if [ "$state" = MERGED ]; then
       printf '%s\n' merged
       exit 0
+    fi
+    # Lifecycle transitions are what a hibernating worker is woken by, and only a
+    # task that supplied an expected head is waiting on one. That expected head is
+    # therefore also the gate on this second lookup: a task without one neither
+    # pays for it nor can be silenced by it, and falls straight through to the
+    # review-activity reporting below exactly as it did before hibernation existed.
+    if [ -n "$expected_head" ]; then
+      raw=$(gh pr view "$url" --json headRefOid,reviewDecision \
+        -q '.headRefOid + "\t" + (.reviewDecision // "")' 2>/dev/null) || exit 0
+      head=${raw%%$'\t'*}
+      review=${raw#*$'\t'}
+      [ "$review" != "$raw" ] || review=
+      case "$head" in
+        *[!0-9a-f]*) exit 0 ;;
+        *) [ "${#head}" -eq 40 ] || [ "${#head}" -eq 64 ] || exit 0 ;;
+      esac
+      case "$state" in
+        CLOSED)
+          printf '%s\n' closed-unmerged
+          exit 0
+          ;;
+        OPEN)
+          if [ "$head" != "$expected_head" ]; then
+            printf 'head-changed:%s\n' "$head"
+            exit 0
+          fi
+          if [ "$review" = CHANGES_REQUESTED ] && [ "$expected_review" != CHANGES_REQUESTED ]; then
+            printf 'changes-requested:%s\n' "$head"
+            exit 0
+          fi
+          ;;
+      esac
     fi
     # Review activity is read in its own call, so a change to the shape below
     # can never turn a working merge lookup silent. Every review row covers one
@@ -145,8 +211,6 @@ case "$provider" in
     case "$path" in
       /*|*/|*//*) exit 0 ;;
     esac
-    # A GitLab project sits under at least one group at no fixed depth, and
-    # GitLab reserves the "-" segment as its route separator.
     rest=$path
     segments=0
     while [ -n "$rest" ]; do
@@ -163,14 +227,6 @@ case "$provider" in
     done
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
-    # glab resolves the instance from the project URL passed to -R, so the host
-    # comes from the validated record rather than glab's configured default.
-    # It cannot take a merge request URL the way gh does: that form shells out
-    # to git for the current repository, and the watcher runs in no repository.
-    # The state is read from glab's own field output rather than its JSON,
-    # because plain glab has no field selector and firstmate does not require a
-    # JSON processor; only an exact "merged" wakes, so a changed format or an
-    # unreadable merge request stays silent instead of reporting a merge.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
