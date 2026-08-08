@@ -55,6 +55,22 @@ board_model() {  # <home> [extra args...]
   FM_HOME="$home" "$BOARD" render --json "$@"
 }
 
+# Identity of a board file on disk, for proving one was NOT rewritten.
+# Platform-detected, never the `stat -f || stat -c` fallback, which writes a
+# partial filesystem dump on Linux before failing and so captures drifting
+# free-block counts instead of file metadata (see bin/fm-watch.sh).
+# Inode leads deliberately: a rebuild stages through mktemp and renames into
+# place, so a rewrite always lands a new inode, while mtime alone is whole
+# seconds and a rebuild takes a fraction of one - an mtime-only comparison
+# cannot fail and would be an inert guard.
+board_file_identity() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%i:%m:%z' "$1" 2>/dev/null
+  else
+    stat -c '%i:%Y:%s' "$1" 2>/dev/null
+  fi
+}
+
 # --- fixtures ---------------------------------------------------------------
 
 write_mixed_backlog() {  # <home>
@@ -319,13 +335,14 @@ test_refresh_rebuilds_on_change_and_skips_when_nothing_moved() {
   first=$(FM_HOME="$home" "$BOARD" refresh --out "$home/board.html") \
     || fail "first refresh failed"
   case "$first" in *rebuilt*) : ;; *) fail "the first refresh did not build: $first" ;; esac
-  stamp1=$(stat -f '%m' "$home/board.html" 2>/dev/null || stat -c '%Y' "$home/board.html")
+  stamp1=$(board_file_identity "$home/board.html")
+  [ -n "$stamp1" ] || fail "could not read the board file back after the first build"
 
   second=$(FM_HOME="$home" "$BOARD" refresh --out "$home/board.html") \
     || fail "second refresh failed"
   [ "$second" = "unchanged" ] \
     || fail "an unchanged fleet still rebuilt the board: $second"
-  stamp2=$(stat -f '%m' "$home/board.html" 2>/dev/null || stat -c '%Y' "$home/board.html")
+  stamp2=$(board_file_identity "$home/board.html")
   [ "$stamp1" = "$stamp2" ] || fail "the board file was rewritten despite no change"
 
   # A real change: one more captain hold.
