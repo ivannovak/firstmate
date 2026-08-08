@@ -7,6 +7,19 @@
 # home) while the fleet changes meaningfully only a handful of times a day.
 # `refresh` is the cheap gate: it fingerprints the authoritative inputs without
 # running the snapshot, and only pays for a rebuild when that fingerprint moved.
+# The gate costs one hash per backlog file plus ONE batched `stat` per home, so a
+# home with hundreds of task records is milliseconds rather than the seconds a
+# per-file loop would cost on the watcher's every supervision cycle.
+#
+# CHANGE DETECTION COVERS LOCAL HOMES ONLY. The gate touches the main home and
+# every registered secondmate home that lives on this filesystem, and it makes no
+# network call, because the watcher runs it inline on every cycle. A remote
+# secondmate home is therefore not watched: a change made only inside its own
+# backlog does not by itself trigger a rebuild, though a parent event landing in
+# this home's state/<id>.status still does. Every registered mate home is local
+# today, so this is a disclosed limit on a future arrangement rather than a live
+# gap; the rendered page says so in its own footer, and a remote home that IS
+# registered is named in the board's omitted[].
 #
 # DERIVED, NEVER STORED. Every number and every card comes from one execution of
 # bin/fm-fleet-snapshot.sh. This script keeps no task state of its own: the only
@@ -23,7 +36,9 @@
 #   2. moving - a worker is actually running right now. Live work outranks a
 #      recorded hold, matching the bearings rule that a working child is underway.
 #   3. waiting - held or blocked on someone other than the captain, or queued for
-#      dispatch. Every card names who or what it waits on.
+#      dispatch. Every card names who or what it waits on, and a row whose worker
+#      has already finished, failed, or gone unreadable says exactly that rather
+#      than falling through to the queued default, which would be false.
 #   4. landed - completed, with its artifact link.
 #
 # AGE HONESTY. tasks-axi stamps `since` when an item is FILED and does not restamp
@@ -69,6 +84,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SNAPSHOT="$SCRIPT_DIR/fm-fleet-snapshot.sh"
+# data/secondmates.md has exactly one parser. The change-detection gate walks the
+# same records the snapshot does, so it must read them the same way: the shared
+# parser anchors on the full record suffix and knows the remote form, which an
+# ad-hoc pattern here would mis-anchor on ordinary scope prose.
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 BOARD_OUT="${FM_BOARD_OUT:-$STATE/fleet-board.html}"
 FINGERPRINT_FILE="$STATE/.fleet-board.fingerprint"
@@ -118,19 +140,20 @@ now_epoch() { date -u +%s; }
 # and hashes the small backlog files, and never runs the canonical snapshot.
 # Any real fleet change moves at least one of these, because firstmate records
 # every dispatch, status event, and metadata write through them.
+# Local homes only, and no network read of any kind - see the header.
 fingerprint() {
   {
     printf 'home\t%s\n' "$FM_HOME"
     fingerprint_home "$DATA" "$STATE" main
     if [ -f "$DATA/secondmates.md" ]; then
       printf 'secondmates\t%s\n' "$(shasum -a 256 "$DATA/secondmates.md" | awk '{print $1}')"
-      while IFS= read -r mate_home; do
-        [ -n "$mate_home" ] || continue
-        [ -d "$mate_home" ] || continue
-        fingerprint_home "$mate_home/data" "$mate_home/state" "mate:$mate_home"
-      done <<EOF
-$(sed -n 's/.*(home:[[:space:]]*\([^;)]*\).*/\1/p' "$DATA/secondmates.md" 2>/dev/null)
-EOF
+      while IFS= read -r line; do
+        secondmate_registry_parse_line "$line" || continue
+        [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+        [ -d "$SECONDMATE_REGISTRY_HOME" ] || continue
+        fingerprint_home "$SECONDMATE_REGISTRY_HOME/data" "$SECONDMATE_REGISTRY_HOME/state" \
+          "mate:$SECONDMATE_REGISTRY_ID"
+      done < "$DATA/secondmates.md"
     fi
   } | shasum -a 256 | awk '{print $1}'
 }
@@ -139,20 +162,26 @@ EOF
 # every task metadata and status file. A secondmate's child work shows on the
 # board too, so its state has to move the fingerprint exactly as the main home's
 # does, or a mate's progress would leave the board silently behind.
+#
+# The whole home's metadata comes back from ONE stat process. The obvious
+# per-file loop forks three times per file, which is linear in task count and
+# multiplied by every home, on a gate the watcher runs inline before its signal
+# scan; batching keeps a few hundred records in the milliseconds the poll loop
+# can afford. Path, mtime, and size are the same inputs either way.
 fingerprint_home() {  # <data-dir> <state-dir> <label>
-  local data=$1 state=$2 label=$3 f
+  local data=$1 state=$2 label=$3
   if [ -f "$data/backlog.md" ]; then
     printf '%s\tbacklog\t%s\n' "$label" \
       "$(shasum -a 256 "$data/backlog.md" | awk '{print $1}')"
   else
     printf '%s\tbacklog\tabsent\n' "$label"
   fi
-  for f in "$state"/*.meta "$state"/*.status; do
-    [ -e "$f" ] || continue
-    printf '%s\t%s\t%s\t%s\n' "$label" "$(basename "$f")" \
-      "$(stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || echo 0)" \
-      "$(stat -f '%z' "$f" 2>/dev/null || stat -c '%s' "$f" 2>/dev/null || echo 0)"
-  done
+  (
+    shopt -s nullglob
+    set -- "$state"/*.meta "$state"/*.status
+    [ "$#" -gt 0 ] || exit 0
+    stat -f '%N %m %z' "$@" 2>/dev/null || stat -c '%n %Y %s' "$@" 2>/dev/null || true
+  ) | sort | awk -v label="$label" '{ print label "\t" $0 }'
 }
 
 # --- model ------------------------------------------------------------------
@@ -189,15 +218,24 @@ build_model() {  # -> fm-fleet-board.v1 JSON on stdout
     . as $snap
     | ([ $snap.tasks[] | select(.kind != "secondmate") ]) as $tasks
     | ([ $tasks[] | select(.current_state.state == "working") | .id ]) as $working_ids
+    # Every child that is NOT running. "unknown" belongs here with the declared
+    # waits: the worker is not working, and a row whose worker cannot be read is
+    # still owed a truthful label rather than the queued-for-dispatch default.
     | ([ $tasks[]
          | select(.current_state.state == "paused" or .current_state.state == "parked"
-                  or .current_state.state == "blocked")
+                  or .current_state.state == "blocked" or .current_state.state == "unknown")
          | {id, state:.current_state.state,
             detail:((.current_state.detail // .current_state.state) | trunc(160))} ]) as $stalled
     | (reduce $stalled[] as $s ({}; .[$s.id] = $s)) as $stalled_by_id
     | ([ $snap.backlog.records[] | select(.structured) ]) as $records
     | (reduce $tasks[] as $t ({}; .[$t.id] = $t)) as $task_by_id
     | (($snap.main_inventory.orphan_in_flight // [])) as $orphans
+    # An in-flight row whose worker already reached done or failed. The snapshot
+    # owns this condition (main_inventory.terminal_in_flight); the board only
+    # renders it, because a card that says "queued for dispatch" about finished
+    # work is false reporting to the captain.
+    | (($snap.main_inventory.terminal_in_flight // [])) as $terminal
+    | (reduce $terminal[] as $t ({}; .[$t.id] = $t)) as $terminal_by_id
 
     # --- column 1: every live captain-owned thread ---------------------------
     | ([ $records[]
@@ -266,17 +304,27 @@ build_model() {  # -> fm-fleet-board.v1 JSON on stdout
          | select(.state != "done")
          | select($placed_2 | index($r.id) | not)
          | (($stalled_by_id[$r.id]) // null) as $st
+         | (($terminal_by_id[$r.id]) // null) as $tm
          | ((.unresolved_blocker_ids // [])) as $ub
+         | (if $tm == null then null
+            elif $tm.state == "failed" then "failed"
+            else "finished" end) as $ended
          | {id:.id, title:(.title | trunc(150)),
             waiting_on:(
               if (.hold_reason != null and .hold_kind != null) then ("held: " + .hold_kind)
               elif ($ub | length) > 0 then ("blocked by " + ($ub | join(", ")))
-              elif $st != null then $st.state
+              elif $ended != null then ("nobody: its worker already " + $ended)
+              elif $st != null then ("its worker, whose state is " + $st.state)
               else "queued for dispatch" end),
             detail:(
               ((.hold_reason // .blocked_reason
+                // (if $ended != null
+                    then ("Still recorded as under way, but its worker has already " + $ended
+                          + ": " + (($task_by_id[$r.id].current_state.detail // $tm.state)))
+                    else null end)
                 // (if $st != null then $st.detail else null end)
                 // "Filed and waiting for a slot.") | trunc(300))),
+            attention:($ended != null),
             project:(.repo | project_of), thread:(.id | thread_of),
             owner:"(main)", pr_url:(.pr_url // null),
             age_date:(.since // null), age_days:age_days(.since // null),
@@ -288,10 +336,30 @@ build_model() {  # -> fm-fleet-board.v1 JSON on stdout
                           then ("blocked by " + (.unresolved_blocker_ids | join(", ")))
                           else "held" end),
               detail:((.reason // "held") | trunc(300)),
+              attention:false,
               project:$m.id, thread:$m.id, owner:$m.id, pr_url:null,
               age_date:null, age_days:null, age_kind:"open"} ])
       as $waiting_all
     | ([ $waiting_all[] | . as $w | select($placed_1 | index($w.id) | not) ]) as $waiting
+
+    # --- what the snapshot could not hand over -------------------------------
+    # captain_threads[] is bounded per home by FM_SNAPSHOT_SECONDMATE_DECISIONS,
+    # while counts.captain_threads is that home stating its true total. The
+    # headline needs-you number is the TOTAL, never the length of what fitted:
+    # an inflated count is annoying, a missing one is invisible, and this is the
+    # exact undercount the board exists to kill. Every row that could not be
+    # listed is named in omitted[] below rather than quietly disappearing.
+    | ([ ($snap.secondmate_current.records // [])[]
+         | {id, dropped:(((.counts.captain_threads // 0)
+                          - ((.captain_threads // []) | length))
+                         | if . > 0 then . else 0 end)}
+         | select(.dropped > 0) ]) as $mate_thread_drops
+    | (([ $mate_thread_drops[] | .dropped ] | add) // 0) as $needs_you_undisclosed
+    | (($needs_you | length) + $needs_you_undisclosed) as $needs_you_total
+    # Registered mate homes this fingerprint cannot watch. Change detection is
+    # local-only by design (see the header), so a change made only inside a
+    # remote home does not by itself trigger a rebuild.
+    | ([ ($snap.secondmate_current.records // [])[] | select(.remote == true) ]) as $remote_mates
 
     # --- column 4: landed ----------------------------------------------------
     | ([ $records[]
@@ -334,9 +402,10 @@ build_model() {  # -> fm-fleet-board.v1 JSON on stdout
       home:($snap.fm_home | split("/") | (.[-2:] | join("/"))),
       source:{schema:$snap.schema, generated:$snap.generated},
       counts:{
-        needs_you:($needs_you | length),
+        needs_you:$needs_you_total,
         needs_you_actionable:([$needs_you[] | select(.actionable)] | length),
         needs_you_blocked:([$needs_you[] | select(.actionable | not)] | length),
+        needs_you_undisclosed:$needs_you_undisclosed,
         moving:($moving | length),
         waiting:($waiting | length),
         landed:($landed_all | length)
@@ -344,7 +413,7 @@ build_model() {  # -> fm-fleet-board.v1 JSON on stdout
       columns:[
         {key:"needs_you", title:"Needs you",
          blurb:"A decision, an approval, a merge, a credential, or a blocker only you can clear.",
-         count:($needs_you | length),
+         count:$needs_you_total,
          groups:($needs_you[:$column_n] | group_threads)},
         {key:"waiting", title:"Waiting on someone else",
          blurb:"Blocked on a person or an external run, not on you.",
@@ -372,6 +441,14 @@ build_model() {  # -> fm-fleet-board.v1 JSON on stdout
          then {surface:"main inventory",
                count:0,
                note:($snap.main_inventory.reason // "main inventory invalid")} else empty end),
+        ($mate_thread_drops[]
+         | {surface:("secondmate " + .id + " captain threads"),
+            count:.dropped,
+            note:"counted in the needs-you total above, but the snapshot bound how many of them it could list"}),
+        ($remote_mates[]
+         | {surface:("secondmate " + .id),
+            count:0,
+            note:"remote home: change detection is local-only, so a change made only in its own backlog does not by itself rebuild this board"}),
         (($snap.secondmate_current.records // [])[]
          | select(.provenance.selected != "structured-home")
          | {surface:("secondmate " + .id),
@@ -413,6 +490,8 @@ render_html() {  # <model-json-path>
       + (if $col == "needs_you" and (.actionable == false)
          then "<p class=\"tag\">Cannot be answered yet: blocked by " + (.blocked_by | h) + "</p>"
          elif $col == "needs_you" then "<p class=\"tag ready\">Ready for your answer</p>"
+         elif $col == "waiting" and .attention == true
+         then "<p class=\"tag warn\">Waiting on " + (.waiting_on | h) + "</p>"
          elif $col == "waiting" then "<p class=\"tag\">Waiting on " + (.waiting_on | h) + "</p>"
          elif $col == "moving" and .attention == true
          then "<p class=\"tag warn\">Nothing is actually running</p>"
@@ -538,7 +617,12 @@ render_html() {  # <model-json-path>
     "<p class=\"subhead\">" + (.counts.needs_you | tostring)
       + " threads are waiting on you — " + (.counts.needs_you_actionable | tostring)
       + " you can answer now, " + (.counts.needs_you_blocked | tostring)
-      + " blocked behind other work. "
+      + " blocked behind other work"
+      + (if ((.counts.needs_you_undisclosed // 0) > 0)
+         then ", " + (.counts.needs_you_undisclosed | tostring)
+              + " counted but not listed below (see Not shown)"
+         else "" end)
+      + ". "
       + (.counts.moving | tostring) + " moving, "
       + (.counts.waiting | tostring) + " waiting, "
       + (.counts.landed | tostring) + " landed.</p>",
@@ -549,6 +633,7 @@ render_html() {  # <model-json-path>
 
     "<footer>",
     "<p>This board is a snapshot, not a live feed. It is rebuilt when fleet state actually changes, so the age above is the age of the fleet reading, not of this page load.</p>",
+    "<p>Change detection covers local homes only. A second mate whose home is on another machine is read into the columns above, but a change made only inside that home does not by itself trigger a rebuild, though a parent event landing in the status log here still does. Every registered mate home is local today, so this is a limit on a future arrangement rather than a gap you are looking at; any remote home that is registered is named under Not shown.</p>",
     "<p>Ages are derived from the date each item was filed, which is the only durable date the backlog records; a decision record is filed the moment the decision arises, so those read <em>waiting on you</em>. Landed dates are exact.</p>",
     (if (.omitted | length) > 0 then
       "<p>Not shown:</p><ul>"
@@ -606,14 +691,39 @@ claim_rebuild() {
   return 0
 }
 
+# Temporaries a rebuild is currently holding, reclaimed from the EXIT trap the
+# rebuild arms before it starts. An inline `|| rm -f` guard cannot do this job:
+# build_model and render_html both end in die, and die exits the shell rather
+# than returning non-zero to a `||`. Under the watcher the leak is unbounded -
+# one temp per failed poll, with stderr discarded, so nothing would report it.
+BOARD_TMP=
+MODEL_TMP=
+
+discard_rebuild_temps() {
+  [ -z "$BOARD_TMP" ] || rm -f "$BOARD_TMP"
+  [ -z "$MODEL_TMP" ] || rm -f "$MODEL_TMP"
+  BOARD_TMP=
+  MODEL_TMP=
+  return 0
+}
+
+release_rebuild() {
+  discard_rebuild_temps
+  rm -rf "$LOCK_DIR"
+  return 0
+}
+
 write_board() {  # <out-path>
-  local out=$1 tmp
+  local out=$1
   mkdir -p "$(dirname "$out")" || die "cannot create $(dirname "$out")"
-  tmp=$(mktemp "${out}.XXXXXX") || die "cannot create a temporary file next to $out"
-  build_model > "$MODEL_FILE.tmp" || { rm -f "$tmp" "$MODEL_FILE.tmp"; exit 1; }
-  render_html "$MODEL_FILE.tmp" > "$tmp" || { rm -f "$tmp" "$MODEL_FILE.tmp"; exit 1; }
-  mv "$MODEL_FILE.tmp" "$MODEL_FILE"
-  mv "$tmp" "$out"
+  BOARD_TMP=$(mktemp "${out}.XXXXXX") || die "cannot create a temporary file next to $out"
+  MODEL_TMP="$MODEL_FILE.tmp"
+  build_model > "$MODEL_TMP" || die "board projection failed"
+  render_html "$MODEL_TMP" > "$BOARD_TMP" || die "board rendering failed"
+  mv "$MODEL_TMP" "$MODEL_FILE"
+  mv "$BOARD_TMP" "$out"
+  MODEL_TMP=
+  BOARD_TMP=
   chmod 0644 "$out"
   # A board that is currently published must not keep serving the previous
   # rebuild; refresh the published copy in place.
@@ -637,12 +747,33 @@ write_board() {  # <out-path>
 #     the local network even before Tailscale's own tailnet scoping applies.
 # The published directory holds ONLY the rendered board, never the surrounding
 # state/ directory, which is full of private fleet records.
+#
+# This guard FAILS CLOSED. "I could not determine whether a funnel is configured"
+# is not "there is no funnel": a security control that reports success when its
+# own evidence is missing protects nothing. A query that errors, or that answers
+# with something this script cannot read, stops publishing and says so.
 assert_no_funnel() {
-  local cfg
-  cfg=$(tailscale serve status --json 2>/dev/null) || return 0
-  if printf '%s' "$cfg" | jq -e '(.AllowFunnel // {}) | to_entries | map(select(.value)) | length > 0' >/dev/null 2>&1; then
-    die "refusing to publish: a Tailscale funnel is configured, which would expose this board publicly. Clear it with 'tailscale funnel reset' first."
-  fi
+  local cfg verdict
+  cfg=$(tailscale serve status --json 2>/dev/null) \
+    || die "refusing to publish: 'tailscale serve status --json' failed, so whether a funnel is already configured could not be determined. Fix the Tailscale CLI, then publish again."
+  # An empty or null answer from a CLI that exited cleanly means nothing is
+  # published at all, and a funnel IS a serve configuration, so none can be
+  # hiding behind it. Anything else has to parse.
+  [ -n "${cfg//[[:space:]]/}" ] || return 0
+  verdict=$(printf '%s' "$cfg" | jq -r '
+    if . == null then "clear"
+    elif type != "object" then "unreadable"
+    elif (.AllowFunnel // null) == null then "clear"
+    elif (.AllowFunnel | type) != "object" then "unreadable"
+    elif ([.AllowFunnel | to_entries[] | select(.value == true)] | length) > 0 then "funnel"
+    else "clear" end' 2>/dev/null) || verdict=unreadable
+  case "$verdict" in
+    clear) return 0 ;;
+    funnel)
+      die "refusing to publish: a Tailscale funnel is configured, which would expose this board publicly. Clear it with 'tailscale funnel reset' first." ;;
+    *)
+      die "refusing to publish: 'tailscale serve status --json' returned something this script cannot read, so whether a funnel would expose this board publicly could not be determined." ;;
+  esac
 }
 
 # Mirror the rendered board into a directory that contains nothing else.
@@ -653,25 +784,72 @@ publish_webroot() {  # <board-path>
   chmod 0644 "$WEBROOT/index.html"
 }
 
-local_server_running() {
+# A pidfile is only evidence if the process it names is still the server this
+# script started. state/ survives reboots, so a bare `kill -0` on a recorded pid
+# says nothing: the number may since have been recycled onto an unrelated user
+# process, which unserve would then kill and serve would then trust as a live
+# board. Match the recorded pid against the command line that only this server
+# has - the module, this home's port, and this home's publish directory.
+server_pid() {
+  local pid cmd
   [ -f "$PIDFILE" ] || return 1
-  kill -0 "$(cat "$PIDFILE" 2>/dev/null || echo 0)" 2>/dev/null
+  pid=$(head -n 1 "$PIDFILE" 2>/dev/null | tr -dc '0-9')
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+  case "$cmd" in
+    *http.server*"$FM_BOARD_LOCAL_PORT"*"$WEBROOT"*) printf '%s\n' "$pid" ;;
+    *) return 1 ;;
+  esac
 }
 
+local_server_running() { server_pid >/dev/null 2>&1; }
+
+stop_local_server() {
+  local pid
+  pid=$(server_pid 2>/dev/null) && kill "$pid" 2>/dev/null
+  rm -f "$PIDFILE"
+  return 0
+}
+
+# Is anything at all answering this loopback port? Bash's own /dev/tcp is used
+# rather than lsof or nc so the check needs nothing installed.
+port_answering() {  # <port>
+  ( exec 3<>"/dev/tcp/127.0.0.1/$1" ) >/dev/null 2>&1
+}
+
+# Fails CLOSED on a contended port. The hazard is specific: if something else
+# already holds FM_BOARD_LOCAL_PORT, python exits at once with EADDRINUSE, a
+# naive readiness probe succeeds against the FOREIGN server, and the tailnet
+# publish that follows would proxy an unrelated local service to every one of
+# the captain's devices. So the port must be free, or already held by a server
+# this script can prove it started.
 start_local_server() {
+  local pid i=0
   local_server_running && return 0
+  if port_answering "$FM_BOARD_LOCAL_PORT"; then
+    die "refusing to publish: 127.0.0.1:$FM_BOARD_LOCAL_PORT is already answering, and it is not this board's server. Stop whatever holds that port, or set FM_BOARD_LOCAL_PORT to a free one."
+  fi
   command -v python3 >/dev/null 2>&1 \
     || die "python3 not found, and it is what serves the board to Tailscale on 127.0.0.1"
   python3 -m http.server "$FM_BOARD_LOCAL_PORT" --bind 127.0.0.1 --directory "$WEBROOT" \
     >/dev/null 2>&1 &
-  printf '%s\n' "$!" > "$PIDFILE"
-  local i=0
+  pid=$!
+  printf '%s\n' "$pid" > "$PIDFILE"
   while [ "$i" -lt 50 ]; do
-    if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$FM_BOARD_LOCAL_PORT/" 2>/dev/null; then
-      return 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PIDFILE"
+      die "refusing to publish: the local board server exited immediately on 127.0.0.1:$FM_BOARD_LOCAL_PORT, so that port is not usable. Set FM_BOARD_LOCAL_PORT to a free one."
     fi
+    if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$FM_BOARD_LOCAL_PORT/" 2>/dev/null; then
+      local_server_running && return 0
+      stop_local_server
+      die "refusing to publish: 127.0.0.1:$FM_BOARD_LOCAL_PORT is answering, but not from the board server this script started."
+    fi
+    sleep 0.1
     i=$((i + 1))
   done
+  stop_local_server
   die "the local board server never became reachable on 127.0.0.1:$FM_BOARD_LOCAL_PORT"
 }
 
@@ -697,10 +875,7 @@ cmd_serve() {
 cmd_unserve() {
   need tailscale
   tailscale serve --bg --https="$FM_BOARD_HTTPS_PORT" off >/dev/null 2>&1 || true
-  if local_server_running; then
-    kill "$(cat "$PIDFILE")" 2>/dev/null || true
-  fi
-  rm -f "$PIDFILE"
+  stop_local_server
   rm -rf "$WEBROOT"
   echo "withdrawn"
 }
@@ -747,6 +922,17 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# The fingerprint gate and the rendered model belong to ONE board path. A render
+# to a scratch --out must never mark the canonical board's inputs as current, or
+# the watcher would report "unchanged" for a canonical board that never saw the
+# change. The rebuild lock stays shared on purpose: every board path pays for the
+# same expensive canonical snapshot, so two of them must not run at once.
+if [ "$OUT" != "$BOARD_OUT" ]; then
+  OUT_TAG=$(printf '%s' "$OUT" | shasum -a 256 | awk '{print substr($1, 1, 16)}')
+  FINGERPRINT_FILE="$STATE/.fleet-board.fingerprint.$OUT_TAG"
+  MODEL_FILE="$STATE/.fleet-board.model.$OUT_TAG.json"
+fi
+
 case "$CMD" in
   render)
     need jq
@@ -757,9 +943,14 @@ case "$CMD" in
     # Take the same single-flight claim a refresh does: both write the same
     # model and board files, so a manual render must not race a detached one.
     claim_rebuild || die "another rebuild is already running"
-    trap 'rm -rf "$LOCK_DIR"' EXIT
+    trap release_rebuild EXIT
+    # BEFORE the build, exactly as refresh does. A rebuild takes minutes on a
+    # real fleet, and a fingerprint taken afterwards would record every change
+    # that arrived during it as though this board already showed them - leaving
+    # the next refresh reporting "unchanged" for a board missing a decision.
+    current=$(fingerprint)
     write_board "$OUT"
-    fingerprint > "$FINGERPRINT_FILE"
+    printf '%s\n' "$current" > "$FINGERPRINT_FILE"
     echo "rebuilt $OUT"
     ;;
   refresh)
@@ -773,13 +964,13 @@ case "$CMD" in
     claim_rebuild || { echo "busy"; exit 0; }
     if [ "$DETACH" = 1 ]; then
       (
-        trap 'rm -rf "$LOCK_DIR"' EXIT
+        trap release_rebuild EXIT
         write_board "$OUT" && printf '%s\n' "$current" > "$FINGERPRINT_FILE"
       ) >/dev/null 2>&1 &
       echo "rebuilding"
       exit 0
     fi
-    trap 'rm -rf "$LOCK_DIR"' EXIT
+    trap release_rebuild EXIT
     write_board "$OUT"
     printf '%s\n' "$current" > "$FINGERPRINT_FILE"
     echo "rebuilt $OUT"

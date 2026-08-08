@@ -387,16 +387,40 @@ test_a_stale_rebuild_lock_is_reclaimed() {
 }
 
 test_fingerprint_moves_only_with_real_state_change() {
-  local home a b c
+  local home a b c d e empty i
   home=$(make_home fingerprint)
   write_mixed_backlog "$home"
+
+  # A home with no task state at all still has to produce a fingerprint: the
+  # gate reads the state directory in bulk, and no matching file is an ordinary
+  # resting state, not an error.
+  empty=$(FM_HOME="$home" "$BOARD" fingerprint) || fail "an empty state directory broke the fingerprint"
+  [ -n "$empty" ] || fail "an empty state directory produced no fingerprint"
+
+  # Enough records that a per-file walk and a bulk read would disagree if the
+  # bulk read dropped or reordered anything.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    printf 'window=firstmate:fm-task-%s\nkind=ship\n' "$i" > "$home/state/task-$i.meta"
+    printf 'working: task %s under way\n' "$i" > "$home/state/task-$i.status"
+  done
+
   a=$(FM_HOME="$home" "$BOARD" fingerprint)
   b=$(FM_HOME="$home" "$BOARD" fingerprint)
   [ "$a" = "$b" ] || fail "the fingerprint was not stable across two reads"
+  [ "$a" != "$empty" ] || fail "ten tasks appearing did not move the fingerprint"
 
   printf 'working: something happened\n' > "$home/state/newtask.status"
   c=$(FM_HOME="$home" "$BOARD" fingerprint)
   [ "$a" != "$c" ] || fail "a new status event did not move the fingerprint"
+
+  # An append to an existing log, and a metadata rewrite, each on a file the
+  # bulk read has already seen.
+  printf 'done: task 7 finished\n' >> "$home/state/task-7.status"
+  d=$(FM_HOME="$home" "$BOARD" fingerprint)
+  [ "$c" != "$d" ] || fail "an appended status event did not move the fingerprint"
+  printf 'window=firstmate:fm-task-3\nkind=scout\n' > "$home/state/task-3.meta"
+  e=$(FM_HOME="$home" "$BOARD" fingerprint)
+  [ "$d" != "$e" ] || fail "a rewritten task metadata file did not move the fingerprint"
   pass "the fingerprint is stable at rest and moves on a real state event"
 }
 
@@ -430,6 +454,46 @@ EOF
   c=$(FM_HOME="$home" "$BOARD" fingerprint)
   [ "$b" != "$c" ] || fail "a secondmate child status event did not move the fingerprint"
   pass "the fingerprint follows secondmate backlog and child state, not just the main home"
+}
+
+# The gate reads data/secondmates.md through the shared registry parser, which is
+# anchored to the full record suffix. Scope prose that happens to mention a home
+# must not redirect the walk, a remote record must not break it, and a remote home
+# is deliberately not fingerprinted: no network call may enter this path.
+test_fingerprint_reads_the_registry_the_way_its_owner_does() {
+  local home mate decoy a b c d
+  home=$(make_home fingerprint-registry)
+  mate=$(make_mate_home fingerprint-registry-home mate)
+  decoy=$TMP_ROOT/fingerprint-registry-decoy
+  mkdir -p "$decoy/state" "$decoy/data"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$mate/data/backlog.md"
+  # Ordinary prose that happens to name a home, a real local record, and a remote
+  # record: only the middle one is a home this gate may walk.
+  cat > "$home/data/secondmates.md" <<EOF
+# Second mates
+
+Retired: the gamma mate used to live at (home: $decoy) before it moved.
+
+- mate - owns gamma work (home: $mate; scope: gamma work; projects: gamma; added 2026-08-02)
+- faraway - owns delta work (host: elsewhere.example; root: /srv/fm; home: /srv/fm/home; scope: delta work; projects: delta; added 2026-08-03)
+EOF
+  a=$(FM_HOME="$home" "$BOARD" fingerprint) || fail "a registry with a remote record broke the fingerprint"
+  b=$(FM_HOME="$home" "$BOARD" fingerprint)
+  [ "$a" = "$b" ] || fail "the fingerprint was not stable across a registry with mixed record forms"
+
+  # A directory named only by prose is not a registered home, so nothing inside
+  # it is fleet state and it must not move this gate.
+  printf 'working: not a registered home\n' > "$decoy/state/decoy-child.status"
+  c=$(FM_HOME="$home" "$BOARD" fingerprint)
+  [ "$a" = "$c" ] \
+    || fail "prose that merely names a directory made it an input to change detection"
+
+  # The one real local record still is.
+  printf 'working: mate child started\n' > "$mate/state/mate-child.status"
+  d=$(FM_HOME="$home" "$BOARD" fingerprint)
+  [ "$c" != "$d" ] || fail "the registered local mate home stopped moving the fingerprint"
+  pass "the change-detection walk resolves registry records through their one owner"
 }
 
 test_board_never_asserts_how_it_was_opened() {
@@ -518,6 +582,8 @@ EOF
 
 # A fake tailscale that records every argv it is handed, so the serve path can be
 # judged by what it actually runs rather than by reading the script's source.
+# FM_FAKE_TS_STATUS_FAIL makes the funnel query itself fail, which is the case
+# the guard has to treat as "could not determine" rather than as "all clear".
 make_fake_tailscale() {  # <home> <serve-status-json>
   local fb=$1/fakebin
   mkdir -p "$fb"
@@ -528,7 +594,12 @@ set -u
 printf '%s\n' "$*" >> "${FM_FAKE_TS_LOG:?}"
 case "$1 ${2:-}" in
   "serve status")
-    if [ "${3:-}" = "--json" ]; then cat "${FM_FAKE_TS_STATUS:?}"; else echo "https://macbook-pro.example.ts.net/"; fi
+    if [ "${3:-}" = "--json" ]; then
+      [ -z "${FM_FAKE_TS_STATUS_FAIL:-}" ] || exit 3
+      cat "${FM_FAKE_TS_STATUS:?}"
+    else
+      echo "https://macbook-pro.example.ts.net/"
+    fi
     ;;
   "status --json") printf '{"Self":{"DNSName":"macbook-pro.example.ts.net."}}\n' ;;
   *) : ;;
@@ -691,6 +762,301 @@ test_serve_requires_a_built_board() {
   pass "serve refuses when there is no board to publish"
 }
 
+# The funnel guard is the only thing between this board and a pre-existing public
+# listener, so "I could not tell" must stop publishing exactly as "yes there is
+# one" does. Both unanswerable shapes are exercised: a query that errors, and a
+# query that answers with something the guard cannot read.
+test_serve_refuses_when_the_funnel_check_cannot_be_answered() {
+  local home fb log out rc lport hport
+  home=$(make_home serve-funnel-unknown)
+  write_mixed_backlog "$home"
+  FM_HOME="$home" "$BOARD" render --out "$home/board.html" >/dev/null || fail "board render failed"
+  fb=$(make_fake_tailscale "$home" '{"AllowFunnel":{}}')
+  log=$home/ts.log
+  lport=$(free_port)
+  hport=$((lport + 1))
+
+  : > "$log"
+  set +e
+  out=$(PATH="$fb:$PATH" FM_FAKE_TS_LOG="$log" FM_FAKE_TS_STATUS="$home/serve-status.json" \
+    FM_FAKE_TS_STATUS_FAIL=1 FM_BOARD_LOCAL_PORT="$lport" FM_BOARD_HTTPS_PORT="$hport" \
+    FM_HOME="$home" "$BOARD" serve --out "$home/board.html" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { stop_served_home "$home" "$fb" "$lport" "$hport"
+                       fail "serve published while the funnel query was failing: $out"; }
+  case "$out" in
+    *"could not be determined"*) : ;;
+    *) fail "the refusal did not say the funnel state was undetermined: $out" ;;
+  esac
+  grep -q '^serve --bg ' "$log" && fail "serve published before it could rule out a funnel: $(cat "$log")"
+
+  # Same requirement for a well-formed reply of the wrong shape.
+  printf '%s' '{"AllowFunnel":"probably not"}' > "$home/serve-status.json"
+  : > "$log"
+  set +e
+  out=$(PATH="$fb:$PATH" FM_FAKE_TS_LOG="$log" FM_FAKE_TS_STATUS="$home/serve-status.json" \
+    FM_BOARD_LOCAL_PORT="$lport" FM_BOARD_HTTPS_PORT="$hport" \
+    FM_HOME="$home" "$BOARD" serve --out "$home/board.html" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { stop_served_home "$home" "$fb" "$lport" "$hport"
+                       fail "serve published against an unreadable funnel report: $out"; }
+  grep -q '^serve --bg ' "$log" && fail "serve published before it could read the funnel report: $(cat "$log")"
+  pass "serve refuses to publish whenever the funnel state cannot be determined"
+}
+
+# Proxying whatever happens to answer FM_BOARD_LOCAL_PORT would publish an
+# unrelated local service to the whole tailnet, so a contended port is a refusal,
+# never an adoption.
+test_serve_refuses_when_the_local_port_is_already_held() {
+  local home fb log out rc lport hport squatter
+  home=$(make_home serve-port-taken)
+  write_mixed_backlog "$home"
+  FM_HOME="$home" "$BOARD" render --out "$home/board.html" >/dev/null || fail "board render failed"
+  fb=$(make_fake_tailscale "$home" '{"AllowFunnel":{}}')
+  log=$home/ts.log
+  : > "$log"
+  lport=$(free_port)
+  hport=$((lport + 1))
+
+  mkdir -p "$home/squat"
+  printf 'not the board\n' > "$home/squat/index.html"
+  python3 -m http.server "$lport" --bind 127.0.0.1 --directory "$home/squat" >/dev/null 2>&1 &
+  squatter=$!
+  local waited=0
+  while [ "$waited" -lt 50 ] \
+    && ! curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$lport/" 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$lport/" 2>/dev/null \
+    || { kill "$squatter" 2>/dev/null; fail "the fixture never bound the contended port"; }
+
+  set +e
+  out=$(PATH="$fb:$PATH" FM_FAKE_TS_LOG="$log" FM_FAKE_TS_STATUS="$home/serve-status.json" \
+    FM_BOARD_LOCAL_PORT="$lport" FM_BOARD_HTTPS_PORT="$hport" \
+    FM_HOME="$home" "$BOARD" serve --out "$home/board.html" 2>&1)
+  rc=$?
+  kill "$squatter" 2>/dev/null
+  wait "$squatter" 2>/dev/null
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "serve adopted a foreign service on the local port: $out"
+  case "$out" in
+    *"$lport"*) : ;;
+    *) fail "the refusal did not name the contended port: $out" ;;
+  esac
+  if grep -q '^serve --bg ' "$log"; then
+    fail "serve published a foreign local service to the tailnet: $(cat "$log")"
+  fi
+  pass "serve refuses a contended local port instead of proxying a foreign service"
+}
+
+# The undercount this board exists to kill, in its last hiding place: the
+# snapshot bounds how many of a mate home's captain holds it will LIST, and the
+# headline number must still be the true total, with the shortfall disclosed.
+test_a_capped_secondmate_home_never_shortens_the_needs_you_total() {
+  local home mate model listed i
+  home=$(make_home mate-capped)
+  mate=$(make_mate_home mate-capped-home mate)
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  {
+    printf '## In flight\n\n## Queued\n'
+    for i in 1 2 3 4 5; do
+      printf -- '- [ ] mate-question-%s - Question %s (repo: gamma) (kind: ship) (since 2026-08-02) (hold: captain picks %s) (hold-kind: captain)\n' \
+        "$i" "$i" "$i"
+    done
+    printf '\n## Done\n'
+  } > "$mate/data/backlog.md"
+  cat > "$home/data/secondmates.md" <<EOF
+# Second mates
+
+- mate - owns gamma work (home: $mate; scope: gamma work; projects: gamma; added 2026-08-02)
+EOF
+
+  model=$(FM_SNAPSHOT_SECONDMATE_DECISIONS=2 board_model "$home") || fail "board render failed"
+  listed=$(printf '%s' "$model" \
+    | jq -r '[.columns[]|select(.key=="needs_you")|.groups[].threads[].items[]] | length')
+  [ "$listed" -lt 5 ] \
+    || fail "the fixture did not actually cap the mate home's captain holds (listed $listed)"
+  printf '%s' "$model" | jq -e '.counts.needs_you == 5' >/dev/null \
+    || fail "the capped mate home shortened the needs-you total: $(printf '%s' "$model" | jq -c .counts)"
+  printf '%s' "$model" | jq -e '
+    [.omitted[] | select(.surface | test("captain threads"))] as $d
+    | ($d | length) == 1 and ($d[0].count == (5 - '"$listed"'))' >/dev/null \
+    || fail "the dropped captain holds were never disclosed: $(printf '%s' "$model" | jq -c .omitted)"
+  pass "a capped secondmate home keeps the needs-you total true and discloses what it could not list"
+}
+
+# The board must never say the opposite of what happened. An in-flight row whose
+# worker has already finished, or whose worker cannot be read at all, used to
+# fall through to "queued for dispatch / Filed and waiting for a slot".
+test_a_finished_or_unreadable_worker_is_never_reported_as_queued() {
+  local home fb model finished unreadable gen
+  home=$(make_home terminal-worker)
+  mkdir -p "$home/projects/wt" "$home/fakebin"
+  cat > "$home/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$home/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *) printf '%%1\n' ;;
+    esac ;;
+  capture-pane) printf 'all quiet\n> \n' ;;
+esac
+exit 0
+SH
+  chmod +x "$home/fakebin/no-mistakes" "$home/fakebin/tmux"
+  fb=$home/fakebin
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] finished-worker - Work whose worker already finished (repo: alpha) (kind: ship) (since 2026-08-01)
+- [ ] unreadable-worker - Work whose worker cannot be read (repo: alpha) (kind: ship) (since 2026-08-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/finished-worker.meta" \
+    "window=firstmate:fm-finished-worker" \
+    "worktree=$home/projects/wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" finished-worker)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" finished-worker idle --gen "$gen" \
+    --source claude-hook --event stop
+  printf 'done: the worker finished and never closed the row\n' > "$home/state/finished-worker.status"
+  # No worktree at all, so its current state cannot be read.
+  fm_write_meta "$home/state/unreadable-worker.meta" \
+    "window=firstmate:fm-unreadable-worker" \
+    "kind=ship"
+
+  model=$(PATH="$fb:$PATH" board_model "$home") || fail "board render failed"
+  finished=$(printf '%s' "$model" | jq -c '
+    [.columns[]|select(.key=="waiting")|.groups[].threads[].items[]
+     |select(.id=="finished-worker")][0]')
+  [ "$finished" != "null" ] && [ -n "$finished" ] \
+    || fail "the finished row left the waiting column entirely: $(printf '%s' "$model" | jq -c .counts)"
+  printf '%s' "$finished" | jq -e '
+    .waiting_on != "queued for dispatch"
+    and (.waiting_on | test("finished"))
+    and (.detail | test("Filed and waiting for a slot") | not)
+    and .attention == true' >/dev/null \
+    || fail "a finished worker was still reported as queued for dispatch: $finished"
+
+  unreadable=$(printf '%s' "$model" | jq -c '
+    [.columns[]|select(.key=="waiting")|.groups[].threads[].items[]
+     |select(.id=="unreadable-worker")][0]')
+  printf '%s' "$unreadable" | jq -e '
+    .waiting_on != "queued for dispatch"
+    and (.waiting_on | test("unknown"))' >/dev/null \
+    || fail "an unreadable worker was still reported as queued for dispatch: $unreadable"
+  pass "a finished or unreadable worker is named for what it is, never as queued for dispatch"
+}
+
+test_board_discloses_that_change_detection_is_local_only() {
+  local home html
+  home=$(make_home local-only-disclosure)
+  write_mixed_backlog "$home"
+  FM_HOME="$home" "$BOARD" render --out "$home/board.html" >/dev/null || fail "board render failed"
+  html=$(cat "$home/board.html")
+  case "$html" in
+    *"Change detection covers local homes only"*) : ;;
+    *) fail "the board did not disclose that change detection is local-only" ;;
+  esac
+  case "$html" in
+    *"does not by itself trigger a rebuild"*) : ;;
+    *) fail "the board did not say what a remote home's own backlog change fails to do" ;;
+  esac
+  pass "the page states plainly that change detection covers local homes only"
+}
+
+# A rebuild takes minutes on a real fleet. Capturing the fingerprint after the
+# build would record everything that arrived during it as already shown, leaving
+# the next refresh silent about a board that is missing a decision.
+test_render_records_the_inputs_as_they_were_before_the_build() {
+  local home pid waited late
+  home=$(make_home render-order)
+  write_mixed_backlog "$home"
+
+  FM_HOME="$home" "$BOARD" render --out "$home/board.html" >/dev/null 2>&1 &
+  pid=$!
+  # The rebuild stages its board beside the target before it starts projecting,
+  # so this file appearing means the build is under way.
+  waited=0
+  while [ "$waited" -lt 300 ] && ! ls "$home"/board.html.* >/dev/null 2>&1; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  ls "$home"/board.html.* >/dev/null 2>&1 || { wait "$pid"; fail "the render never started a build"; }
+  kill -0 "$pid" 2>/dev/null || fail "the render finished before the fixture could change state"
+  printf 'working: a change that arrived mid-build\n' > "$home/state/midbuild.status"
+  wait "$pid" || fail "the render failed"
+
+  late=$(FM_HOME="$home" "$BOARD" refresh --out "$home/board.html")
+  case "$late" in
+    *rebuilt*) : ;;
+    *) fail "a change that arrived during the build was recorded as already shown: $late" ;;
+  esac
+  pass "render fingerprints the inputs as they were before the build, not after it"
+}
+
+test_rendering_elsewhere_never_marks_the_canonical_board_current() {
+  local home canonical scratch after
+  home=$(make_home render-out-isolation)
+  write_mixed_backlog "$home"
+
+  FM_HOME="$home" "$BOARD" render >/dev/null || fail "canonical render failed"
+  canonical=$(cat "$home/state/.fleet-board.fingerprint")
+
+  # A real change, then a render to somewhere else entirely. The canonical
+  # board still has not seen the change, so its gate must not say otherwise.
+  printf 'working: a change the canonical board never saw\n' > "$home/state/scratch-change.status"
+  scratch=$home/scratch.html
+  FM_HOME="$home" "$BOARD" render --out "$scratch" >/dev/null || fail "scratch render failed"
+  [ -f "$scratch" ] || fail "the scratch render produced no board"
+
+  after=$(cat "$home/state/.fleet-board.fingerprint")
+  [ "$after" = "$canonical" ] \
+    || fail "a render to another path rewrote the canonical board's input fingerprint"
+  case "$(FM_HOME="$home" "$BOARD" refresh)" in
+    *rebuilt*) : ;;
+    *) fail "the canonical board reported itself current after a change it never saw" ;;
+  esac
+  pass "a render to another path leaves the canonical board's freshness gate alone"
+}
+
+# Under the watcher a failed rebuild retries every poll, so a temp file left
+# behind per failure is unbounded, and the watcher discards this script's stderr.
+test_a_failed_rebuild_leaves_no_temporary_files() {
+  local home rc out strays
+  home=$(make_home failed-rebuild)
+  write_mixed_backlog "$home"
+
+  set +e
+  out=$(FM_BOARD_LANDED='not-a-number' FM_HOME="$home" "$BOARD" render --out "$home/board.html" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the forced build failure did not actually fail: $out"
+
+  strays=$(find "$home" -name 'board.html.*' -o -name '.fleet-board.model*.tmp' | wc -l | tr -d ' ')
+  [ "$strays" = 0 ] \
+    || fail "a failed rebuild left $strays temporary file(s): $(find "$home" -name 'board.html.*' -o -name '.fleet-board.model*.tmp')"
+  [ ! -d "$home/state/.fleet-board.lock" ] \
+    || fail "a failed rebuild left its single-flight lock behind"
+  pass "a failed rebuild cleans up its temporary files and releases its lock"
+}
+
 test_needs_you_count_is_derived_not_shaped
 test_needs_you_count_tracks_a_hold_appearing_and_clearing
 test_blocked_captain_hold_is_counted_but_marked_unanswerable
@@ -706,10 +1072,19 @@ test_detached_refresh_returns_at_once_and_runs_single_flight
 test_a_stale_rebuild_lock_is_reclaimed
 test_fingerprint_moves_only_with_real_state_change
 test_fingerprint_follows_secondmate_state_too
+test_fingerprint_reads_the_registry_the_way_its_owner_does
 test_board_never_asserts_how_it_was_opened
 test_secondmate_captain_holds_reach_the_board
 test_snapshot_exposes_captain_threads_for_every_secondmate_hold
 test_a_troubled_secondmate_home_still_surrenders_its_captain_decisions
+test_a_capped_secondmate_home_never_shortens_the_needs_you_total
+test_a_finished_or_unreadable_worker_is_never_reported_as_queued
+test_board_discloses_that_change_detection_is_local_only
+test_render_records_the_inputs_as_they_were_before_the_build
+test_rendering_elsewhere_never_marks_the_canonical_board_current
+test_a_failed_rebuild_leaves_no_temporary_files
 test_serve_publishes_through_serve_and_never_funnel
 test_serve_refuses_while_a_funnel_is_configured
+test_serve_refuses_when_the_funnel_check_cannot_be_answered
+test_serve_refuses_when_the_local_port_is_already_held
 test_serve_requires_a_built_board

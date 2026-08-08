@@ -798,9 +798,10 @@ while :; do
   # Captain-facing fleet board, refreshed on real state change rather than on a
   # timer. The watcher poll IS the change signal, so this runs every cycle, but
   # bin/fm-fleet-board.sh only pays for a rebuild when its cheap input
-  # fingerprint moved; an unchanged fleet costs a few stat calls and one small
-  # hash. A rebuild that IS due is handed to a detached single-flight child, so
-  # this loop never waits minutes on a snapshot and never stacks rebuilds.
+  # fingerprint moved; an unchanged fleet costs one hash per backlog file and a
+  # single batched stat per local home, whatever the task count. A rebuild that
+  # IS due is handed to a detached single-flight child, so this loop never waits
+  # minutes on a snapshot and never stacks rebuilds.
   # Inert until the captain opts in by creating config/fleet-board, and never
   # able to affect supervision: a board failure is swallowed here because a read
   # surface must not be able to stop the watcher.
