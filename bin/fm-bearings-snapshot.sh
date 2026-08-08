@@ -23,6 +23,22 @@
 # backlog roles, unresolved blockers, and captain actionability. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
 #
+# Captain's Call partition, for a registered secondmate as for this home: an
+# ACTIONABLE captain hold is a decisions_open row and a BLOCKED one is a gates row
+# naming what blocks it. The secondmate side of both is built from that home's
+# canonical captain_threads, which is its complete live captain-owned set, rather
+# than from decisions_open alone: decisions_open empties when the record drops to
+# the untrusted parent-event fallback, and reading it alone therefore let a home
+# whose current state could not be reconciled contribute a silent zero to the one
+# count that must never undercount. captain_threads survives that drop. Each
+# section unions captain_threads onto the surface it already read - decisions_open
+# for the first, queued for the second - and dedupes by id, keeping the earlier
+# richer row, because a readable home describes the same hold on both surfaces at
+# once and a double count is no more honest than an undercount. A blocked mate hold
+# always reaches gates, unlike this home's, whose held row is an in_flight row of
+# its own; a mate's is not, so suppressing it would hide it everywhere.
+# Status-sourced decisions stay excluded here; the canonical snapshot keeps them.
+#
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
 # Bearings never invents Underway rows from backlog-only ids; it discloses those
@@ -307,6 +323,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | $groups[]
        | select(length > $i)
        | .[$i]][:$n];
+  # First-occurrence-wins dedupe that PRESERVES input order, unlike unique_by,
+  # which sorts. A captain hold in a readable home is described by two snapshot
+  # surfaces at once, so the richer earlier row has to win without the section
+  # silently reordering itself.
+  def dedupe_by_id:
+    reduce .[] as $row ([]; if any(.[]; .id == $row.id) then . else . + [$row] end);
   ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
@@ -383,10 +405,17 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.structured and .captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",
             summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
-     + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
-         | select(.source == "backlog" and .verb == "captain-hold")
-         | {id:($m.id + "/" + .id),key,verb,
-            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
+     + [ (.secondmate_current.records // [])[] as $m
+         | ([ $m.decisions_open[]?
+              | select(.source == "backlog" and .verb == "captain-hold")
+              | {id,key,verb,
+                 summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90))} ]
+            + [ $m.captain_threads[]?
+                | select(.actionable == true)
+                | {id,key:.id,verb:"captain-hold",
+                   summary:(((.title // .id) + ": " + (.reason // "captain decision pending")) | trunc(90))} ]
+            | dedupe_by_id)[]
+         | {id:($m.id + "/" + .id),key,verb,summary,owner:$m.id} ]) as $decisions_all
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
@@ -406,12 +435,20 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
             reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
-         | select($m.provenance.selected == "structured-home")
-         | $m.queued[]?
-         | select(.captain_actionable != true)
-         | {id,title:(.title | trunc(60)),
-            blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
-            reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:$m.id} ]) as $gates_all
+         | ([ if $m.provenance.selected == "structured-home" then
+                $m.queued[]?
+                | select(.captain_actionable != true)
+                | {id,title:(.title | trunc(60)),
+                   blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
+                   reason:((.hold_reason // .blocked_reason // "-") | trunc(40))}
+              else empty end ]
+            + [ $m.captain_threads[]?
+                | select(.actionable != true)
+                | {id,title:(.title | trunc(60)),
+                   blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
+                   reason:((.reason // "-") | trunc(40))} ]
+            | dedupe_by_id)[]
+         | . + {owner:$m.id} ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))

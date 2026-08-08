@@ -88,6 +88,7 @@ Rules that keep the contract unambiguous:
 - A live captain hold is never action-free and outranks that boundary: `decisions_open` carries every unblocked captain hold whatever the held item's state or kind, so a held item belongs in Captain's Call even when the snapshot also reports its own worker as still working.
 - A secondmate's own row appears Underway only for `active_child_work`; `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown`.
+- A secondmate home whose current state could not be reconciled at all still contributes its captain holds, so never read its `unknown` row as owing the captain nothing: its other surfaces are genuinely empty, but its unblocked holds are already in `decisions_open` and its blocked ones in `gates`, and both belong in the digest as usual.
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
 - The chat follows `AGENTS.md` section 9 and carries one scannable line per item.

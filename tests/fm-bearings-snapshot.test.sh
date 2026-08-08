@@ -1889,6 +1889,130 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+# A mate home whose live child cannot be reconciled drops to the untrusted
+# parent-event fallback, which empties every projected surface except
+# captain_threads. Captain's Call must read that surviving set, or a real captain
+# hold inside a troubled home contributes a silent zero to the one count whose
+# whole purpose is to never undercount what awaits the captain.
+test_troubled_mate_captain_hold_reaches_captains_call() {
+  local home mate fakebin canonical json
+  home=$(make_home troubled-mate-captain)
+  mate="$TMP_ROOT/troubled-mate-home"
+  : > "$home/data/secondmates.md"
+  make_valid_secondmate_home troubled "$mate"
+  append_secondmate_registry "$home" troubled "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] troubled-decision - Choose the remediation (repo: sample) (kind: captain) (hold: captain remediation choice pending) (hold-kind: captain)
+
+## Done
+EOF
+  # A live child with no in-flight backlog row is unreconcilable current state, and
+  # this home has no parent event to fall back to, so the record lands in the
+  # fallback branch with provenance unknown.
+  mkdir -p "$mate/projects/stray"
+  fm_write_meta "$mate/state/stray-child.meta" \
+    "window=firstmate:fm-stray-child" "worktree=$mate/projects/stray" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" stray-child busy
+  printf 'working: unowned work\n' > "$mate/state/stray-child.status"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "troubled")
+    | .provenance.selected == "unknown"
+      and .decisions_open == []
+      and .queued == []
+      and .holds == []
+      and [.captain_threads[].id] == ["troubled-decision"]
+      and .captain_threads[0].actionable == true
+      and .counts.captain_threads == 1
+  ' >/dev/null || fail "troubled-home fixture did not reproduce the fallback drop: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.decisions_open[] | select(.id == "troubled/troubled-decision")] | length) == 1
+      and (.decisions_open[] | select(.id == "troubled/troubled-decision")
+           | .key == "troubled-decision" and .verb == "captain-hold" and .owner == "troubled"
+             and (.summary | contains("captain remediation choice pending")))
+      and (.gates | any(.id == "troubled-decision") | not)
+  ' >/dev/null || fail "an actionable captain hold in a troubled mate home never reached Captain's Call: $json"
+
+  # The same hold with an unresolved blocker stays captain-owned but unanswerable,
+  # so it belongs under gates rather than silently vanishing from both surfaces.
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] troubled-decision - Choose the remediation blocked-by: upstream-fix (repo: sample) (kind: captain) (hold: captain remediation choice pending) (hold-kind: captain)
+
+## Done
+EOF
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.id == "troubled/troubled-decision") | not)
+      and ([.gates[] | select(.id == "troubled-decision" and .owner == "troubled")] | length) == 1
+      and (.gates[] | select(.id == "troubled-decision")
+           | .blocked_by == "upstream-fix"
+             and (.reason | contains("captain remediation choice pending")))
+  ' >/dev/null || fail "a blocked captain hold in a troubled mate home never reached gates: $json"
+  pass "a captain hold inside a troubled mate home still reaches Captain's Call"
+}
+
+# The control for the fixture above: a readable home already projects its own
+# backlog captain holds, so reading captain_threads on top of them must count each
+# hold exactly once. Trading an undercount for a double count fails the same way.
+test_readable_mate_captain_hold_is_counted_once() {
+  local home mate fakebin canonical json
+  home=$(make_home readable-mate-captain)
+  mate="$TMP_ROOT/readable-mate-home"
+  : > "$home/data/secondmates.md"
+  make_valid_secondmate_home readable "$mate"
+  append_secondmate_registry "$home" readable "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] readable-decision - Choose the remediation (repo: sample) (kind: captain) (hold: captain remediation choice pending) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "readable")
+    | .provenance.selected == "structured-home"
+      and [.decisions_open[].id] == ["readable-decision"]
+      and [.captain_threads[].id] == ["readable-decision"]
+      and .counts.captain_threads == 1
+  ' >/dev/null || fail "readable-home control fixture was not structured: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.decisions_open[] | select(.id == "readable/readable-decision")] | length) == 1
+      and (.decisions_open | length) == 1
+      and (.gates | any(.id == "readable-decision") | not)
+  ' >/dev/null || fail "a readable mate captain hold was double counted in Captain's Call: $json"
+
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] readable-decision - Choose the remediation blocked-by: upstream-fix (repo: sample) (kind: captain) (hold: captain remediation choice pending) (hold-kind: captain)
+
+## Done
+EOF
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.id == "readable/readable-decision") | not)
+      and ([.gates[] | select(.id == "readable-decision" and .owner == "readable")] | length) == 1
+      and (.gates[] | select(.id == "readable-decision") | .blocked_by == "upstream-fix")
+  ' >/dev/null || fail "a blocked readable mate captain hold left gates or was duplicated: $json"
+  pass "a readable mate captain hold is counted exactly once in Captain's Call"
+}
+
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -1919,6 +2043,8 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
+test_troubled_mate_captain_hold_reaches_captains_call
+test_readable_mate_captain_hold_is_counted_once
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
