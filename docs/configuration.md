@@ -32,6 +32,7 @@ Two local, gitignored files under the effective home's `config/` name the git re
 `config/update-remote` names the remote every home in this fleet fast-forwards its own tracked files from.
 Absent means `origin`, which is exactly what a home with no configuration has always used, so an unconfigured install is unchanged.
 `bin/fm-update.sh` reports the resolved remote as its `update-source:` line and refuses the whole run rather than falling back when the configured name is unusable, because silently reverting to `origin` would move an entire fleet to a source nobody chose.
+A file that exists but cannot be read as an ordinary file - a symlink, or a permissions accident - keeps the `origin` default so an unconfigured or reconciled home stays smooth, but the resolver warns on stderr naming the file and the remote it used instead, so that fallback is never silent either.
 The primary home propagates this file to every secondmate home as inherited local material (`bin/fm-config-inherit-lib.sh`), so the fleet self-updates from one source; a remote route carries the same resolved choice into that host's shared code root, which has no home configuration of its own.
 A target whose checkout has no such remote is skipped and reported by name, exactly like any other target that cannot cleanly fast-forward.
 
@@ -49,7 +50,9 @@ Setting the two depends on how the home's remotes are already arranged, and both
 
 Two behaviors follow from a configured upstream.
 `bin/fm-absorb-upstream.sh` is the separate, deliberate path that pulls the upstream project's work into the fork; it is fast-forward-only, never writes to the upstream remote, and reports genuine divergence with its ahead/behind counts instead of reconciling it.
-`bin/fm-pr-check.sh` refuses to arm a merge poll for a pull request at that upstream, because nobody in this fleet can merge it and waiting on it would only produce recurring wakes; a pull request anywhere else is unaffected.
+No poll is armed for a pull request at that upstream, because nobody in this fleet can merge it and waiting on it would only produce recurring wakes; a pull request anywhere else is unaffected.
+That refusal lives in the shared arming primitive in `bin/fm-pr-lib.sh` that every armed poll passes through, so `bin/fm-pr-check.sh` and the rebuild paths in `bin/fm-pr-check-migrate.sh` are all covered; the migration reports such a task as `upstream contribution poll quarantined and left unarmed` rather than as a repair it failed to make.
+It acts only on a positive repository-identity match (host plus project path, case-insensitive), never on the provider and never on an upstream it cannot resolve, because suppressing more than that one repository would silently stop merge wakes the fleet depends on.
 `AGENTS.md` section 12 owns the operating model those two behaviors serve.
 
 ## Pi Calm preference (config/calm)
@@ -348,7 +351,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, `update-remote`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.

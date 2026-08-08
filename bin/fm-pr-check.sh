@@ -66,33 +66,29 @@ fi
 # A pull request opened AT the upstream open-source project this home
 # contributes to is fire-and-forget: this fleet has no merge authority there,
 # nothing downstream waits on it, and arming a poll would only produce recurring
-# wakes for a decision someone else makes on their own schedule. Refuse to arm
-# it, and say which pull request should have been recorded instead.
+# wakes for a decision someone else makes on their own schedule. Refuse it at
+# the front door, where there is a person to tell which pull request should have
+# been recorded instead; bin/fm-pr-lib.sh's arming primitive enforces the same
+# rule for every other path that could arm one.
 # A home with no upstream configured never reaches this check at all, so the
 # default behavior is unchanged.
-# The check acts only on a POSITIVE identity match. A configured remote that
+# An unusable configured NAME is a refusal here rather than a lost check,
+# because this is an operator typing a command with a person to answer. The
+# match itself acts only on a POSITIVE identity match: a configured remote that
 # cannot be resolved to a forge identity - a missing remote, a local-path URL -
-# leaves it unable to judge, and it warns and continues rather than blocking
-# every unrelated project's merge poll on this home's own contribution setting.
+# warns and continues rather than blocking every unrelated project's merge poll
+# on this home's own contribution setting.
 fm_upstream_contribution_remote_var "$CONFIG" || {
   echo "error: $FM_UPDATE_SOURCE_ERROR" >&2
   exit 1
 }
-UPSTREAM_REMOTE=$FM_UPSTREAM_CONTRIBUTION_REMOTE
-if [ -n "$UPSTREAM_REMOTE" ]; then
-  if UPSTREAM_ID=$(fm_update_source_remote_identity "$FM_ROOT" "$UPSTREAM_REMOTE"); then
-    PR_ID=$(printf '%s\t%s\n' \
-      "$(printf '%s' "$HOST" | tr '[:upper:]' '[:lower:]')" \
-      "$(printf '%s' "$PROJECT_PATH" | tr '[:upper:]' '[:lower:]')")
-    if [ "$PR_ID" = "$UPSTREAM_ID" ]; then
-      echo "error: $URL is a contribution to the upstream project ($UPSTREAM_REMOTE); upstream pull requests are not waited on" >&2
-      echo "record the pull request on this fleet's own update source instead" >&2
-      exit 1
-    fi
-  else
-    echo "warning: upstream contribution remote '$UPSTREAM_REMOTE' has no resolvable forge identity; not checking this PR against it" >&2
-  fi
+if fm_upstream_contribution_pr_match "$CONFIG" "$FM_ROOT" "$HOST" "$PROJECT_PATH"; then
+  echo "error: $URL is a contribution to the upstream project ($FM_UPSTREAM_CONTRIBUTION_REMOTE); upstream pull requests are not waited on" >&2
+  echo "record the pull request on this fleet's own update source instead" >&2
+  exit 1
 fi
+[ -z "$FM_UPSTREAM_CONTRIBUTION_WARNING" ] \
+  || echo "warning: $FM_UPSTREAM_CONTRIBUTION_WARNING" >&2
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while

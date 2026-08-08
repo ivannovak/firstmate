@@ -16,6 +16,14 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# Arming is also where this home's upstream-contribution refusal is enforced,
+# because every armed poll passes through fm_pr_poll_prepare below.
+
+FM_PR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_PR_LIB_ROOT="$(cd "$FM_PR_LIB_DIR/.." && pwd)"
+# shellcheck source=bin/fm-update-source-lib.sh
+. "$FM_PR_LIB_DIR/fm-update-source-lib.sh"
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -451,6 +459,27 @@ fm_pr_poll_revoke_final() {
   return "$failed"
 }
 
+# A pull request AT this home's configured upstream contribution target is
+# fire-and-forget: nobody in this fleet can merge it, so an armed poll would
+# only wake firstmate forever for a decision made elsewhere.
+# The refusal lives here, in the one primitive every armed poll passes through,
+# rather than in each entrypoint: bin/fm-pr-check.sh and both rebuild paths in
+# bin/fm-pr-check-migrate.sh already funnel through it, so the guarantee holds
+# by construction instead of by every caller remembering to check.
+# fm_upstream_contribution_pr_match owns the scope, and answers only on a
+# positive repository-identity match; every other repository arms unchanged.
+FM_PR_POLL_RC_UPSTREAM=3
+fm_pr_poll_upstream_contribution() { # <host> <project-path>
+  local root home config
+  root=${FM_ROOT_OVERRIDE:-$FM_PR_LIB_ROOT}
+  home=${FM_HOME:-$root}
+  config=${FM_CONFIG_OVERRIDE:-$home/config}
+  fm_upstream_contribution_pr_match "$config" "$root" "$1" "$2"
+}
+
+# Returns FM_PR_POLL_RC_UPSTREAM, distinct from every failure, when arming was
+# refused for that reason: nothing was prepared and nothing needs repair, so a
+# caller can record the deliberate outcome instead of an incomplete migration.
 fm_pr_poll_prepare() {
   local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8
   fm_pr_task_id_valid "$id" || return 1
@@ -460,6 +489,13 @@ fm_pr_poll_prepare() {
   [ "$path" = "$FM_PR_PATH" ] || return 1
   [ "$number" = "$FM_PR_NUMBER" ] || return 1
   [ -f "$template" ] || return 1
+
+  if fm_pr_poll_upstream_contribution "$host" "$path"; then
+    FM_PR_POLL_DATA_TMP=
+    FM_PR_POLL_CHECK_TMP=
+    FM_PR_POLL_REG_TMP=
+    return "$FM_PR_POLL_RC_UPSTREAM"
+  fi
 
   [ ! -L "$state" ] || return 1
   mkdir -p "$state" || return 1

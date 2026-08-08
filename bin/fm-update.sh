@@ -61,8 +61,10 @@ fi
 [ $# -eq 0 ] || { usage; exit 1; }
 
 # --- update source ---------------------------------------------------------
-# Refuse rather than advancing the whole fleet from a remote the operator did
-# not name: a misconfigured value must never silently resolve back to origin.
+# An unusable remote NAME refuses rather than advancing the whole fleet from a
+# remote the operator did not name. An unreadable or symlinked config FILE
+# keeps the documented "origin" default, but the resolver says so on stderr, so
+# a permissions accident cannot move the fleet's source unnoticed either.
 
 fm_update_source_remote_var "$CONFIG" || {
   echo "error: $FM_UPDATE_SOURCE_ERROR" >&2

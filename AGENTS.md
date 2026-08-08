@@ -509,7 +509,7 @@ Landing firstmate work on that source is what completes the task, so a firstmate
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 
 Contributing back to the upstream project is good citizenship, not tracked work.
-Open the pull request, tell the captain it exists, and never wait on it: it takes no backlog item, no development slot, and no monitoring, and `bin/fm-pr-check.sh` refuses to arm a merge poll on it.
+Open the pull request, tell the captain it exists, and never wait on it: it takes no backlog item, no development slot, and no monitoring, and firstmate's shared poll-arming primitive refuses it on every path that could arm one.
 Pulling the upstream project's work back in is the separate deliberate step owned by `bin/fm-absorb-upstream.sh`, run when the captain asks rather than on a schedule.
 It is fast-forward-only, never writes to the upstream remote, and reports genuine divergence for a human decision instead of reconciling it.
 

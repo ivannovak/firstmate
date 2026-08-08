@@ -580,6 +580,115 @@ test_upstream_contribution_pr_arms_nothing() {
   pass "upstream contribution PRs arm nothing; every other PR is unaffected"
 }
 
+# The refusal has to hold at the ARMING primitive, not only at the entrypoint,
+# because bin/fm-pr-check-migrate.sh rebuilds polls from task metadata on its
+# own: any change to bin/fm-pr-poll.sh invalidates every armed poll, and the
+# next bootstrap rebuilds them. Without the primitive-level check, that rebuild
+# re-arms exactly the upstream poll the entrypoint refused.
+#
+# Both directions are proven here, because suppression alone is not the goal:
+# every OTHER repository must still arm and must still produce a merge wake.
+test_upstream_contribution_survives_the_migration_rebuild() {
+  local dir state q rc
+  dir=$(make_case upstream-migration)
+  state="$dir/home/state"
+  q="$state/.pr-check-quarantine"
+  git init -q "$dir/root"
+  git -C "$dir/root" remote add upstream https://github.com/upstream-org/firstmate.git
+  printf 'upstream\n' > "$dir/home/config/upstream-remote"
+
+  # The primitive itself, called directly: the one boundary every arming path
+  # shares answers correctly before any caller is involved.
+  # shellcheck disable=SC2034 # Read by fm-pr-lib.sh through bash's dynamic scope.
+  local FM_ROOT_OVERRIDE="$dir/root" FM_CONFIG_OVERRIDE="$dir/home/config"
+  rc=0
+  fm_pr_poll_prepare "$state" probe-up github https://github.com/upstream-org/firstmate/pull/3 \
+    github.com upstream-org/firstmate 3 "$POLL" || rc=$?
+  [ "$rc" -eq "$FM_PR_POLL_RC_UPSTREAM" ] \
+    || fail "the arming primitive did not refuse an upstream pull request (rc=$rc)"
+  [ ! -e "$state/probe-up.pr-poll" ] || fail "a refused arming left a data sidecar"
+  write_poll_meta "$state" probe-core https://github.com/captain/example-core/pull/4
+  fm_pr_poll_prepare "$state" probe-core github https://github.com/captain/example-core/pull/4 \
+    github.com captain/example-core 4 "$POLL" \
+    || fail "the arming primitive refused an unrelated repository"
+  fm_pr_poll_publish_prepared || fail "an unrelated repository could not publish its poll"
+  fm_pr_poll_artifacts_valid "$state" probe-core "$POLL" \
+    || fail "an unrelated repository did not arm a valid pair"
+  rm -f "$state/probe-core.check.sh" "$state/probe-core.pr-poll" \
+    "$state/probe-core.pr-poll-registration" "$state/probe-core.meta"
+
+  # Now the rebuild path itself: two tasks whose polls were invalidated, one at
+  # the upstream project and one at an ordinary client repository.
+  write_poll_meta "$state" task-up https://github.com/upstream-org/firstmate/pull/12
+  write_poll_meta "$state" task-core https://github.com/captain/example-core/pull/5
+  printf 'legacy upstream bytes\n' > "$state/task-up.check.sh"
+  printf 'legacy client bytes\n' > "$state/task-core.check.sh"
+
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" PATH="$BASE_PATH" \
+    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "migration reported failure for a deliberately unarmed upstream task"
+
+  [ ! -e "$state/task-up.check.sh" ] && [ ! -L "$state/task-up.check.sh" ] \
+    || fail "the migration rebuilt a runnable check for an upstream pull request"
+  [ ! -e "$state/task-up.pr-poll" ] || fail "the migration left an upstream poll sidecar"
+  [ ! -e "$state/task-up.pr-poll-registration" ] \
+    || fail "the migration left an upstream poll registration"
+  [ -f "$q/task-up.diagnostic.upstream" ] \
+    || fail "the migration did not record the upstream outcome"
+  [ ! -e "$q/task-up.diagnostic.failure-canonical" ] \
+    || fail "a deliberate upstream outcome was recorded as a migration failure"
+  assert_grep 'task task-up: upstream contribution poll quarantined and left unarmed' \
+    "$state/.pr-check-migration.log" "the upstream outcome was not logged"
+  find "$q" -name 'task-up.check.*' -type f | grep . >/dev/null \
+    || fail "the legacy upstream check was not quarantined"
+
+  fm_pr_poll_artifacts_valid "$state" task-core "$POLL" \
+    || fail "the migration did not rebuild an unrelated project's poll"
+  assert_grep 'task task-core: canonical legacy poll rebuilt and armed' \
+    "$state/.pr-check-migration.log" "the unrelated rebuild was not logged as armed"
+  assert_valid_migration_marker "$state/.pr-check-migration-v1"
+
+  # The rebuilt client poll still wakes firstmate on a merge. Proving only the
+  # suppression would not show that the fleet's real monitoring survived.
+  rm -f "$state/.last-check"
+  rc=0
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "the watcher did not surface the rebuilt client poll"
+  [ "$(grep -c '^check: .*task-core.check.sh: merged$' "$dir/watch.out")" -eq 1 ] \
+    || fail "an unrelated repository stopped producing a merge wake"
+  ! grep -q 'task-up' "$dir/watch.out" || fail "an upstream pull request produced a wake"
+
+  # The crash-recovery rebuild takes the same boundary: a pending canonical
+  # obligation left by an interrupted migration must not re-arm it either.
+  dir=$(make_case upstream-migration-pending)
+  state="$dir/home/state"
+  q="$state/.pr-check-quarantine"
+  git init -q "$dir/root"
+  git -C "$dir/root" remote add upstream https://github.com/upstream-org/firstmate.git
+  printf 'upstream\n' > "$dir/home/config/upstream-remote"
+  write_poll_meta "$state" task-up https://github.com/upstream-org/firstmate/pull/12
+  mkdir -p "$q"
+  chmod 0700 "$q"
+  printf 'legacy upstream bytes\n' > "$(mktemp "$q/task-up.check.XXXXXX")"
+  printf 'task task-up: migration outcome tracking started before legacy poll handling\n' \
+    > "$q/task-up.diagnostic.pending-canonical"
+  chmod 0600 "$q"/task-up.*
+
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" PATH="$BASE_PATH" \
+    "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+    || fail "pending-obligation recovery reported failure for an upstream task"
+  [ ! -e "$state/task-up.check.sh" ] \
+    || fail "pending-obligation recovery re-armed an upstream pull request"
+  [ -f "$q/task-up.diagnostic.upstream" ] \
+    || fail "pending-obligation recovery did not record the upstream outcome"
+  [ ! -e "$q/task-up.diagnostic.pending-canonical" ] \
+    || fail "pending-obligation recovery left its obligation open"
+  [ ! -e "$q/task-up.diagnostic.failure-canonical" ] \
+    || fail "pending-obligation recovery reported a failure for a deliberate outcome"
+  pass "no rebuild path re-arms an upstream poll, and every other repository still wakes on merge"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -3403,6 +3512,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_upstream_contribution_pr_arms_nothing
+test_upstream_contribution_survives_the_migration_rebuild
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract

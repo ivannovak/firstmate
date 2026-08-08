@@ -22,6 +22,12 @@
 #     follows origin, a named remote the checkout lacks is skipped rather than
 #     silently swapped, and an unusable name refuses the run before anything
 #     moves. Fast-forward-only holds identically under a configured source.
+#   - A config FILE that exists but cannot be read still resolves to origin, so
+#     a home stays usable, but never silently: it names the file and the remote
+#     it used instead.
+#   - The resolvers in bin/fm-update-source-lib.sh, exercised directly: unsafe
+#     remote names refuse with their reason intact in the caller's shell, and
+#     one repository normalizes to one forge identity across every URL spelling.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -33,6 +39,14 @@ UPDATE="$ROOT/bin/fm-update.sh"
 # library's own fetch behavior rather than about a whole update run.
 # shellcheck source=bin/fm-ff-lib.sh
 . "$ROOT/bin/fm-ff-lib.sh"
+
+# The resolvers that decide which remote this fleet follows and which repository
+# its upstream contributions go to. They are sourced directly so their own
+# refusals can be exercised without a whole update run, and so bin/fm-test-run.sh
+# --changed can resolve a change to bin/fm-update-source-lib.sh to a suite: its
+# path→family map finds a library's consuming tests by scanning for its basename.
+# shellcheck source=bin/fm-update-source-lib.sh
+. "$ROOT/bin/fm-update-source-lib.sh"
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -502,6 +516,134 @@ test_fetch_is_deduped_per_source_not_per_object_store() {
   pass "T17 fetch dedup is per source, so a second source on one object store still refreshes"
 }
 
+# --- T18: an unreadable source file falls back to origin, but never quietly --
+# The fallback itself is deliberate: an unconfigured or reconciled home must
+# keep working. What must never happen is that a permissions accident or a
+# stray symlink moves the whole fleet's source with nothing to notice, so the
+# run continues and says which file it could not read and what it used instead.
+test_unreadable_source_config_falls_back_loudly() {
+  local w
+  w=$(new_world t18)
+  add_fork_remote "$w"
+  mkdir -p "$w/home/config"
+  printf 'fork\n' > "$w/dotfiles-update-remote"
+  ln -s "$w/dotfiles-update-remote" "$w/home/config/update-remote"
+  bump_origin "$w" instr
+
+  run_update_checked "$w"
+
+  [ "$RUN_RC" -eq 0 ] || fail "an unreadable update-source file refused the run"
+  assert_contains "$RUN_OUT" "update-source: origin" "the fallback source is reported"
+  assert_contains "$RUN_OUT" "config/update-remote is not a readable ordinary file" \
+    "the warning names the file it could not read"
+  assert_contains "$RUN_OUT" "using the default update source 'origin'" \
+    "the warning states the remote actually used"
+  assert_contains "$RUN_OUT" "firstmate: updated" "the fallback still updated the fleet"
+
+  # Positive control: the same run with an ordinary readable file follows the
+  # configured source and is silent, so the warning above is not unconditional.
+  rm -f "$w/home/config/update-remote"
+  printf 'fork\n' > "$w/home/config/update-remote"
+  run_update_checked "$w"
+  [ "$RUN_RC" -eq 0 ] || fail "a readable update-source file refused the run"
+  assert_contains "$RUN_OUT" "update-source: fork" "a readable file selects its remote"
+  assert_not_contains "$RUN_OUT" "not a readable ordinary file" \
+    "a readable file still warned"
+  pass "T18 an unreadable update-source file falls back to origin loudly, not silently"
+}
+
+# --- T19: the resolvers' own contracts, exercised directly ------------------
+# These decide which remote a whole fleet follows and which pull requests are
+# never waited on, and both answers are consumed by scripts (bin/fm-pr-check.sh,
+# bin/fm-pr-lib.sh, bin/fm-absorb-upstream.sh) whose suites cannot reach these
+# refusals themselves.
+test_source_resolvers_refuse_and_normalize() {
+  local w err id
+  w=$(new_world t19)
+
+  for id in fork upstream-2 a.b_c-1 o; do
+    fm_update_source_remote_name_safe "$id" || fail "safe remote name '$id' was rejected"
+  done
+  # shellcheck disable=SC2016 # Literal rejected remote-name bytes are test data.
+  for id in '' '-x' '--upload-pack=evil' 'a b' 'a/b' 'a;b' '$(x)' "$(printf 'a%.0s' $(seq 65))"; do
+    ! fm_update_source_remote_name_safe "$id" || fail "unsafe remote name '$id' was accepted"
+  done
+
+  # One repository, spelled the three ways a git remote URL is actually
+  # written, plus a different letter case: one normalized identity.
+  local https_id ssh_id scp_id
+  https_id=$(fm_update_source_forge_identity 'https://github.com/Upstream-Org/FirstMate.git') \
+    || fail "an https remote URL had no forge identity"
+  ssh_id=$(fm_update_source_forge_identity 'ssh://git@github.com/upstream-org/firstmate') \
+    || fail "an ssh remote URL had no forge identity"
+  scp_id=$(fm_update_source_forge_identity 'git@github.com:upstream-org/firstmate.git/') \
+    || fail "an scp-like remote URL had no forge identity"
+  [ "$https_id" = "$ssh_id" ] && [ "$ssh_id" = "$scp_id" ] \
+    || fail "the same repository resolved to different forge identities"
+  [ "$https_id" = "$(printf 'github.com\tupstream-org/firstmate')" ] \
+    || fail "forge identity was not normalized to host and owner/repo"
+  for id in '' '/srv/git/mirror.git' 'file:///srv/git/mirror.git' 'https://github.com' \
+    'https://github.com/no-owner' 'ssh://git@/firstmate' '-upload-pack=evil'; do
+    ! fm_update_source_forge_identity "$id" >/dev/null \
+      || fail "'$id' was accepted as a forge identity"
+  done
+
+  # An unsafe configured NAME refuses and says why; the value is cleared so no
+  # caller can proceed on a stale one.
+  mkdir -p "$w/home/config"
+  printf -- '--upload-pack=evil\n' > "$w/home/config/upstream-remote"
+  ! fm_upstream_contribution_remote_var "$w/home/config" \
+    || fail "an unsafe upstream remote name resolved successfully"
+  [ -z "$FM_UPSTREAM_CONTRIBUTION_REMOTE" ] || fail "a refused upstream name still set a value"
+  assert_contains "$FM_UPDATE_SOURCE_ERROR" "not a safe git remote name" \
+    "the upstream refusal states the reason in the caller's own shell"
+
+  # An unreadable upstream file loses the check, so it warns too.
+  rm -f "$w/home/config/upstream-remote"
+  printf 'upstream\n' > "$w/dotfiles-upstream-remote"
+  ln -s "$w/dotfiles-upstream-remote" "$w/home/config/upstream-remote"
+  err="$w/upstream-warn.txt"
+  fm_upstream_contribution_remote_var "$w/home/config" 2> "$err" \
+    || fail "an unreadable upstream file refused instead of reporting no upstream"
+  [ -z "$FM_UPSTREAM_CONTRIBUTION_REMOTE" ] || fail "an unreadable upstream file yielded a remote"
+  assert_grep 'upstream-remote is not a readable ordinary file' "$err" \
+    "the unreadable upstream file was reported"
+
+  # The identity match itself: a positive match only, in every URL spelling,
+  # and never for another repository.
+  rm -f "$w/home/config/upstream-remote"
+  printf 'upstream\n' > "$w/home/config/upstream-remote"
+  for id in 'https://github.com/upstream-org/firstmate.git' \
+    'git@github.com:Upstream-Org/FirstMate.git' \
+    'ssh://git@github.com/upstream-org/firstmate'; do
+    git -C "$w/main" remote remove upstream >/dev/null 2>&1 || true
+    git -C "$w/main" remote add upstream "$id"
+    fm_upstream_contribution_pr_match "$w/home/config" "$w/main" github.com upstream-org/firstmate \
+      || fail "an upstream pull request did not match for '$id'"
+    ! fm_upstream_contribution_pr_match "$w/home/config" "$w/main" github.com captain/example-core \
+      || fail "an unrelated repository matched the upstream identity for '$id'"
+    ! fm_upstream_contribution_pr_match "$w/home/config" "$w/main" gitlab.com upstream-org/firstmate \
+      || fail "a different host matched the upstream identity for '$id'"
+  done
+
+  # An upstream that cannot be resolved is not a match, and says why rather
+  # than leaving the caller to guess.
+  git -C "$w/main" remote remove upstream
+  git -C "$w/main" remote add upstream "$w/not-a-forge"
+  ! fm_upstream_contribution_pr_match "$w/home/config" "$w/main" github.com upstream-org/firstmate \
+    || fail "an unresolvable upstream produced a match"
+  assert_contains "$FM_UPSTREAM_CONTRIBUTION_WARNING" "no resolvable forge identity" \
+    "an unresolvable upstream reports why it could not judge"
+
+  # A home with no upstream configured has nothing to say and nothing to match.
+  rm -f "$w/home/config/upstream-remote"
+  ! fm_upstream_contribution_pr_match "$w/home/config" "$w/main" github.com upstream-org/firstmate \
+    || fail "a home with no upstream matched one"
+  [ -z "$FM_UPSTREAM_CONTRIBUTION_WARNING" ] \
+    || fail "a home with no upstream warned about one"
+  pass "T19 the update-source resolvers refuse unsafe values and normalize one repository to one identity"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -517,5 +659,7 @@ test_missing_configured_remote_is_skipped
 test_unsafe_configured_remote_refuses_before_touching_anything
 test_environment_override_selects_the_source
 test_fetch_is_deduped_per_source_not_per_object_store
+test_unreadable_source_config_falls_back_loudly
+test_source_resolvers_refuse_and_normalize
 
 echo "# all fm-update tests passed"

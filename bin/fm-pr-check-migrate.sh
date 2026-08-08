@@ -6,6 +6,9 @@
 # registered custom checks remain armed, and every other task poll is
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.
+# A rebuild the shared arming primitive refuses because the pull request is at
+# this home's upstream contribution target completes unarmed and is reported as
+# that deliberate outcome, never as an incomplete migration to repair.
 # Usage: fm-pr-check-migrate.sh [--checks-safe]
 set -u
 
@@ -162,6 +165,9 @@ diagnostic_obligation_message() {
         ;;
       ambiguous)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: ambiguous or invalid legacy poll quarantined and unarmed"
+        ;;
+      upstream)
+        MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: upstream contribution poll quarantined and left unarmed; upstream pull requests are not waited on"
         ;;
       validated)
         MIGRATION_DIAGNOSTIC_MESSAGE="task $prefix: validated replacement poll armed after legacy quarantine"
@@ -654,7 +660,7 @@ migrate_legacy_noncanonical_namespace() {
 ensure_diagnostic_obligation() {
   local prefix=$1 kind=$2 message=$3 destination
   case "$kind" in
-    pending-canonical|pending-ambiguous|pending-noncanonical|canonical|failure-canonical|failure-ambiguous|failure-replacement|ambiguous|validated|noncanonical) ;;
+    pending-canonical|pending-ambiguous|pending-noncanonical|canonical|failure-canonical|failure-ambiguous|failure-replacement|ambiguous|upstream|validated|noncanonical) ;;
     *) return 1 ;;
   esac
   [ "$prefix" = "$NONCANONICAL_PREFIX" ] || fm_pr_task_id_valid "$prefix" || return 1
@@ -725,7 +731,9 @@ canonical_terminal_success() {
     && quarantined_artifact_exists "$id" check
 }
 
-ambiguous_terminal_success() {
+# The terminal shape shared by every outcome that deliberately leaves a task
+# unarmed: nothing live in state, and the legacy check preserved in quarantine.
+unarmed_terminal_success() {
   local id=$1 check data registration
   check="$STATE/$id.check.sh"
   data="$STATE/$id.pr-poll"
@@ -746,10 +754,38 @@ complete_canonical_outcome() {
 
 complete_ambiguous_outcome() {
   local id=$1
-  ambiguous_terminal_success "$id" || return 1
+  unarmed_terminal_success "$id" || return 1
   remove_diagnostic_obligation "$id" failure-ambiguous || return 1
   ensure_outcome_obligation "$id" ambiguous || return 1
   remove_diagnostic_obligation "$id" pending-ambiguous
+}
+
+# A canonical rebuild the shared arming primitive refused because the pull
+# request is at this home's upstream contribution target. It is a completed
+# outcome, not an incomplete migration: the task is meant to have no poll, so
+# the legacy artifacts stay quarantined and nothing is left to repair.
+complete_upstream_outcome() {
+  local id=$1
+  unarmed_terminal_success "$id" || return 1
+  remove_diagnostic_obligation "$id" failure-canonical || return 1
+  ensure_outcome_obligation "$id" upstream || return 1
+  remove_diagnostic_obligation "$id" pending-canonical
+}
+
+# Arm a rebuilt canonical poll, or record the upstream-contribution outcome when
+# arming was refused for that reason. Both are terminal successes; only a real
+# failure returns non-zero. Both rebuild paths go through here, so neither can
+# arm a poll the primitive refuses, and neither reports the refusal as damage.
+canonical_arm_or_suppress() {
+  local id=$1 provider=$2 url=$3 host=$4 path=$5 number=$6 rc=0
+  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" || rc=$?
+  if [ "$rc" -eq "$FM_PR_POLL_RC_UPSTREAM" ]; then
+    complete_upstream_outcome "$id"
+    return
+  fi
+  [ "$rc" -eq 0 ] || return 1
+  fm_pr_poll_publish_prepared || return 1
+  complete_canonical_outcome "$id"
 }
 
 complete_validated_outcome() {
@@ -799,9 +835,7 @@ canonical_repair_from_pending() {
   quarantine_artifact "$registration" "$id" registration || return 1
   [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
   [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
-  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" || return 1
-  fm_pr_poll_publish_prepared || return 1
-  canonical_terminal_success "$id"
+  canonical_arm_or_suppress "$id" "$provider" "$url" "$host" "$path" "$number"
 }
 
 ambiguous_repair_from_pending() {
@@ -813,7 +847,7 @@ ambiguous_repair_from_pending() {
   quarantined_artifact_exists "$id" check || return 1
   quarantine_artifact "$data" "$id" data || return 1
   quarantine_artifact "$registration" "$id" registration || return 1
-  ambiguous_terminal_success "$id"
+  unarmed_terminal_success "$id"
 }
 
 live_check_matches_quarantined() {
@@ -872,11 +906,10 @@ recover_pending_outcomes() {
         if [ ! -e "$check" ] && [ ! -L "$check" ]; then
           if quarantined_artifact_exists "$prefix" check; then
             ensure_outcome_obligation "$prefix" failure-canonical || return 1
-            if canonical_repair_from_pending "$prefix"; then
-              complete_canonical_outcome "$prefix" || return 1
-            else
-              migration_failed=1
-            fi
+            # The repair completes its own terminal outcome, because whether
+            # that outcome is the rebuilt poll or the upstream refusal is known
+            # only inside the shared arming primitive it calls.
+            canonical_repair_from_pending "$prefix" || migration_failed=1
           elif [ -e "$failure" ] || [ -L "$failure" ]; then
             migration_failed=1
           fi
@@ -904,7 +937,7 @@ recover_pending_outcomes() {
           migration_failed=1
           continue
         fi
-        if ambiguous_terminal_success "$prefix"; then
+        if unarmed_terminal_success "$prefix"; then
           complete_ambiguous_outcome "$prefix" || return 1
           continue
         fi
@@ -972,6 +1005,7 @@ process_diagnostic_obligations() {
     "$QUARANTINE"/*.diagnostic.failure-ambiguous \
     "$QUARANTINE"/*.diagnostic.failure-replacement \
     "$QUARANTINE"/*.diagnostic.ambiguous \
+    "$QUARANTINE"/*.diagnostic.upstream \
     "$QUARANTINE"/*.diagnostic.validated \
     "$QUARANTINE"/*.diagnostic.noncanonical; do
     [ -e "$obligation" ] || [ -L "$obligation" ] || continue
@@ -983,7 +1017,7 @@ process_diagnostic_obligations() {
     case "$MIGRATION_DIAGNOSTIC_KIND" in
       canonical) canonical_rebuilt=1 ;;
       validated) validated_rearmed=1 ;;
-      ambiguous|noncanonical) quarantined_unarmed=1 ;;
+      ambiguous|upstream|noncanonical) quarantined_unarmed=1 ;;
     esac
   done
   for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
@@ -994,6 +1028,7 @@ process_diagnostic_obligations() {
     "$QUARANTINE"/*.diagnostic.failure-ambiguous \
     "$QUARANTINE"/*.diagnostic.failure-replacement \
     "$QUARANTINE"/*.diagnostic.ambiguous \
+    "$QUARANTINE"/*.diagnostic.upstream \
     "$QUARANTINE"/*.diagnostic.validated \
     "$QUARANTINE"/*.diagnostic.noncanonical; do
     [ -e "$obligation" ] || [ -L "$obligation" ] || continue
@@ -1052,9 +1087,7 @@ if migration_needed; then
         if quarantine_artifact "$check" "$prefix" check \
           && quarantine_artifact "$data" "$prefix" data \
           && quarantine_artifact "$registration" "$prefix" registration \
-          && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" \
-          && fm_pr_poll_publish_prepared \
-          && complete_canonical_outcome "$id"; then
+          && canonical_arm_or_suppress "$id" "$provider" "$url" "$host" "$path" "$number"; then
           :
         else
           migration_failed=1

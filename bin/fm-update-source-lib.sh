@@ -4,8 +4,9 @@
 # Usage: . bin/fm-update-source-lib.sh   (no FM_* setup required)
 #
 # ONE OWNER for resolving both choices, so bin/fm-update.sh,
-# bin/fm-absorb-upstream.sh, bin/fm-remote-secondmate-control.sh, and
-# bin/fm-pr-check.sh cannot drift apart about which remote means what.
+# bin/fm-absorb-upstream.sh, bin/fm-remote-secondmate-control.sh,
+# bin/fm-pr-check.sh, and bin/fm-pr-lib.sh's poll-arming primitive cannot drift
+# apart about which remote means what.
 # docs/configuration.md owns what the two choices are for and how an operator
 # sets them; this file owns the resolution order and the safety rules on a value.
 #
@@ -37,14 +38,37 @@ fm_update_source_remote_name_safe() { # <name>
   return 0
 }
 
+# A config file these resolvers will read: an ordinary readable file, never a
+# symlink. Deliberately stricter than the plain [ -f ] the other firstmate
+# config readers use, because these two values decide which remote a whole
+# fleet fast-forwards from. One predicate, so the reader below and the warning
+# beside it can never disagree about what "usable" means.
+fm_update_source_config_file_usable() { # <path>
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -r "$1" ]
+}
+
+# Say so on stderr when a config file EXISTS but is not usable by that rule,
+# naming the file and the behavior taken instead. An absent file is the
+# documented unconfigured case and stays silent; a present-but-unusable one is
+# the case where silence would let a permissions accident or a stray symlink
+# change what the fleet does while the operator's value still reads correctly.
+fm_update_source_config_warn_unusable() { # <config-dir> <file-name> <consequence>
+  local dir=${1-} name=${2-} path
+  [ -n "$dir" ] && [ -n "$name" ] || return 0
+  path="$dir/$name"
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  fm_update_source_config_file_usable "$path" && return 0
+  printf 'warning: %s is not a readable ordinary file; %s\n' "$path" "${3-}" >&2
+}
+
 # First meaningful line of a config file: blank lines and "#" comments skipped,
-# surrounding whitespace stripped. Echoes nothing when the file is absent,
-# unreadable, a symlink, or has no meaningful line.
+# surrounding whitespace stripped. Echoes nothing when the file is absent, not
+# usable by the rule above, or has no meaningful line.
 fm_update_source_config_value() { # <config-dir> <file-name>
   local dir=${1-} name=${2-} path line
   [ -n "$dir" ] && [ -n "$name" ] || return 0
   path="$dir/$name"
-  [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 0
+  fm_update_source_config_file_usable "$path" || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line%%$'\r'}
     line="${line#"${line%%[![:space:]]*}"}"
@@ -67,11 +91,14 @@ fm_update_source_config_value() { # <config-dir> <file-name>
 # The remote this home fast-forwards its own tracked files from, into
 # FM_UPDATE_SOURCE_REMOTE: FM_UPDATE_REMOTE, then <config-dir>/update-remote,
 # then "origin". Returns 1 with FM_UPDATE_SOURCE_ERROR set and the value cleared
-# when a configured name is unsafe, so a caller refuses rather than silently
-# falling back to a different source.
-# These three are this file's OUTPUT variables: assigned here, read by the
+# when a configured NAME is unsafe, so a caller refuses rather than silently
+# falling back to a different source. An unusable config FILE keeps the "origin"
+# default - the shared template's behavior, which upstream reconciliation
+# depends on - but says so loudly rather than silently.
+# These are this file's OUTPUT variables: assigned here, read by the
 # callers that source it (bin/fm-update.sh, bin/fm-absorb-upstream.sh,
-# bin/fm-remote-secondmate-control.sh, bin/fm-pr-check.sh). ShellCheck sees
+# bin/fm-remote-secondmate-control.sh, bin/fm-pr-check.sh, bin/fm-pr-lib.sh).
+# ShellCheck sees
 # only this file when it is linted as its own root, so the cross-file read is
 # invisible to it here.
 FM_UPDATE_SOURCE_REMOTE=""
@@ -85,6 +112,8 @@ fm_update_source_remote_var() { # [config-dir]
     value=$(fm_update_source_config_value "$dir" update-remote)
   fi
   if [ -z "$value" ]; then
+    fm_update_source_config_warn_unusable "$dir" update-remote \
+      "using the default update source 'origin'"
     # shellcheck disable=SC2034 # Output variable read by callers; see the note above.
     FM_UPDATE_SOURCE_REMOTE=origin
     return 0
@@ -112,7 +141,11 @@ fm_upstream_contribution_remote_var() { # [config-dir]
   if [ -z "$value" ]; then
     value=$(fm_update_source_config_value "$dir" upstream-remote)
   fi
-  [ -n "$value" ] || return 0
+  if [ -z "$value" ]; then
+    fm_update_source_config_warn_unusable "$dir" upstream-remote \
+      "treating this home as having no upstream contribution target"
+    return 0
+  fi
   if ! fm_update_source_remote_name_safe "$value"; then
     # shellcheck disable=SC2034 # Output variable read by callers; see the note above.
     FM_UPDATE_SOURCE_ERROR="upstream contribution target is not a safe git remote name"
@@ -193,4 +226,40 @@ fm_update_source_remote_identity() { # <repo-dir> <remote>
   fm_update_source_remote_name_safe "$remote" || return 1
   url=$(git -C "$dir" remote get-url "$remote" 2>/dev/null) || return 1
   fm_update_source_forge_identity "$url"
+}
+
+# True only when a pull request at <host>/<project-path> is at the SAME
+# repository this home's configured upstream contribution remote points at,
+# compared as a normalized forge identity so the three URL spellings and any
+# letter case all resolve to one answer.
+#
+# ONE OWNER of that question, because more than one caller has to answer it
+# identically: bin/fm-pr-check.sh at the front door and bin/fm-pr-lib.sh's
+# arming primitive, which every poll passes through.
+#
+# It answers only on a POSITIVE match. No upstream configured, an unsafe
+# configured name, a remote that does not exist, or a URL with no forge identity
+# all return 1: the unsafe name leaves its reason in FM_UPDATE_SOURCE_ERROR and
+# the unresolvable remote leaves one in FM_UPSTREAM_CONTRIBUTION_WARNING, for a
+# caller with somewhere to report it. That direction is deliberate and
+# load-bearing: this fleet's
+# merge polls for every other repository - internal projects and client work -
+# must keep waking firstmate, so an unanswerable upstream question must never
+# suppress a poll. Failing closed here would silently cost real monitoring.
+FM_UPSTREAM_CONTRIBUTION_WARNING=""
+fm_upstream_contribution_pr_match() { # <config-dir> <repo-dir> <host> <project-path>
+  local config_dir=${1-} repo_dir=${2-} host=${3-} path=${4-} upstream_id pr_id
+  FM_UPSTREAM_CONTRIBUTION_WARNING=""
+  [ -n "$host" ] && [ -n "$path" ] || return 1
+  fm_upstream_contribution_remote_var "$config_dir" || return 1
+  [ -n "$FM_UPSTREAM_CONTRIBUTION_REMOTE" ] || return 1
+  if ! upstream_id=$(fm_update_source_remote_identity "$repo_dir" "$FM_UPSTREAM_CONTRIBUTION_REMOTE"); then
+    # shellcheck disable=SC2034 # Output variable read by callers; see the note above.
+    FM_UPSTREAM_CONTRIBUTION_WARNING="upstream contribution remote '$FM_UPSTREAM_CONTRIBUTION_REMOTE' has no resolvable forge identity; not checking this PR against it"
+    return 1
+  fi
+  pr_id=$(printf '%s\t%s\n' \
+    "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" \
+    "$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')")
+  [ "$pr_id" = "$upstream_id" ]
 }
