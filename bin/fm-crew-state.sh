@@ -30,7 +30,11 @@
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      checks-passed -> done, failed/cancelled -> failed. Terminal passed ->
+#      done, claiming a merge only when the ci step ran to completion; passed
+#      with its pr or ci steps skipped -> unknown, because the pipeline
+#      observed no merge and the work must be treated as UNLANDED (the
+#      passed-outcome mapping below owns the dated evidence). EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
@@ -258,6 +262,20 @@ nm_ci_step_status() {
   strip_quotes "$(trim "${rest%%,*}")"
 }
 
+# Status token of one named step from the steps[N]{step,status,...} table in
+# $RUN_OUT; empty when the step (or the whole table) is absent. Unlike
+# nm_ci_step_status this reads ANY status, including terminal ones
+# (completed/skipped), because the passed-outcome mapping below must know
+# whether the delivery steps actually ran.
+nm_step_status() {  # <step>
+  local row rest
+  row=$(printf '%s\n' "$RUN_OUT" | grep -E "^[[:space:]]*$1,[[:space:]]*[^,]+," | head -1)
+  [ -n "$row" ] || return 0
+  row=$(trim "$row")
+  rest=${row#*,}
+  strip_quotes "$(trim "${rest%%,*}")"
+}
+
 nm_effective_ci_step_status() {
   local step_status
   if [ "${RUN_STATUS:-}" = fixing ]; then
@@ -278,7 +296,10 @@ nm_effective_ci_step_status() {
 # to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
 # reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
+# actually merged (or failed/cancelled if closed) WHEN the ci step actually
+# runs; a run whose pr/ci steps were skipped still reports outcome=passed with
+# no merge behind it (see the passed-outcome mapping below for the evidence).
+# `axi status`'s steps[] table
 # never distinguishes "still waiting on checks" from "checks green, waiting on
 # merge": both read as plain `ci,running,...`. The only place that transition is
 # recorded is the ci step's own log text, e.g. "all CI checks passed - still
@@ -447,7 +468,31 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        # outcome=passed does NOT by itself prove a merge. Verified 2026-08-05
+        # (run 01JQZX4M8N7P2R6T9V3W5Y8B0C, v1.41.2, sample-phpstan-never-loaded
+        # incident): the pipeline reached outcome=passed with its pr and ci
+        # steps SKIPPED (daemon gh unauthenticated), so no PR was ever opened,
+        # yet this mapping claimed "PR merged/closed" - the exact precondition
+        # for tearing down UNLANDED work. Claim a merge only when the ci step
+        # ran to completion (its monitor exits on merge/close); flag skipped
+        # delivery steps as unknown so the wake surfaces instead of absorbing.
+        passed)
+          pr_step=$(nm_step_status pr)
+          ci_step=$(nm_step_status ci)
+          skipped_steps=""
+          [ "$pr_step" = skipped ] && skipped_steps="pr"
+          [ "$ci_step" = skipped ] && skipped_steps="${skipped_steps:+$skipped_steps,}ci"
+          if [ -n "$skipped_steps" ]; then
+            RUN_STATE=unknown
+            RUN_DETAIL="run passed but delivery steps skipped ($skipped_steps): pipeline observed no merge - treat work as UNLANDED"
+          elif [ "$ci_step" = completed ]; then
+            RUN_STATE="done"
+            RUN_DETAIL="run passed: PR merged/closed"
+          else
+            RUN_STATE="done"
+            RUN_DETAIL="run passed (merge not observed by pipeline steps)"
+          fi
+          ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;

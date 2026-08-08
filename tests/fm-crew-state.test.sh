@@ -278,6 +278,58 @@ outcome: passed
 EOF
 }
 
+# outcome=passed with the pr and ci steps SKIPPED - mirrors the real
+# `axi status --run 01JQZX4M8N7P2R6T9V3W5Y8B0C` output verbatim (v1.41.2,
+# 2026-08-05 sample-phpstan-never-loaded incident): the run passed while its
+# delivery stages never ran, so no PR was opened, let alone merged.
+run_passed_delivery_skipped() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: "1 awaiting, 2 info"
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    rebase,completed,0,1843
+    review,completed,2,308655
+    test,completed,0,448009
+    document,completed,1,402558
+    lint,completed,0,565105
+    push,completed,0,4124
+    pr,skipped,0,111
+    ci,skipped,0,27
+outcome: passed
+EOF
+}
+
+# outcome=passed with the pr and ci steps COMPLETED - the delivery stages ran
+# and the ci monitor exited, which is the one shape where passed does mean the
+# PR was observed merged or closed.
+run_passed_delivery_completed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    rebase,completed,0,1843
+    review,completed,0,308655
+    test,completed,0,448009
+    document,completed,0,402558
+    lint,completed,0,565105
+    push,completed,0,4124
+    pr,completed,0,2000
+    ci,completed,0,60000
+outcome: passed
+EOF
+}
+
 run_failed() {  # <branch>
   cat <<EOF
 run:
@@ -668,7 +720,46 @@ test_terminal_passed() {
   local out; out=$(run_crew_state "$d" feat-d)
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
+  assert_not_contains "$out" "merged" "passed without step evidence must not claim a merge"
   pass "terminal passed run is authoritative"
+}
+
+# Regression for the 2026-08-05 sample-phpstan-never-loaded incident: the
+# pipeline reached outcome=passed with its pr and ci steps SKIPPED (daemon gh
+# unauthenticated - see nm-pr-ci-steps-skip-silently), so no PR existed, yet
+# crew-state rendered "run passed: PR merged/closed". A supervisor trusting
+# that line would tear down UNLANDED work (hard rule 3). A passed run whose
+# delivery steps did not run must never read as merged, and must not read as
+# done at all.
+test_terminal_passed_delivery_skipped() {
+  reset_fakes
+  local d; d=$(new_case passed-delivery-skipped)
+  make_repo_on_branch "$d/wt" fm/feat-dsk
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dsk.meta" "window=fm:fm-feat-dsk" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_delivery_skipped fm/feat-dsk)"
+  local out; out=$(run_crew_state "$d" feat-dsk)
+  assert_not_contains "$out" "merged" "passed with skipped delivery must not claim merged"
+  assert_not_contains "$out" "state: done" "passed with skipped delivery must not read as done"
+  assert_contains "$out" "state: unknown" "passed with skipped delivery -> unknown (surface, do not absorb)"
+  assert_contains "$out" "skipped" "detail names the skipped delivery steps"
+  assert_contains "$out" "source: run-step" "verdict still comes from the run-step"
+  pass "passed run with skipped pr/ci steps never claims merged"
+}
+
+# The one shape where the merged claim is evidence-backed: the ci step ran to
+# completion, meaning the pipeline's CI monitor observed the PR merged/closed.
+test_terminal_passed_delivery_completed() {
+  reset_fakes
+  local d; d=$(new_case passed-delivery-completed)
+  make_repo_on_branch "$d/wt" fm/feat-dok
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dok.meta" "window=fm:fm-feat-dok" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_delivery_completed fm/feat-dok)"
+  local out; out=$(run_crew_state "$d" feat-dok)
+  assert_contains "$out" "state: done" "passed with completed delivery -> done"
+  assert_contains "$out" "PR merged/closed" "completed ci step backs the merged claim"
+  pass "passed run with completed ci step keeps the merged claim"
 }
 
 test_terminal_failed() {
@@ -1328,6 +1419,8 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_terminal_passed_delivery_skipped
+test_terminal_passed_delivery_completed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
