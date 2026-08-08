@@ -28,6 +28,8 @@
 #   - The resolvers in bin/fm-update-source-lib.sh, exercised directly: unsafe
 #     remote names refuse with their reason intact in the caller's shell, and
 #     one repository normalizes to one forge identity across every URL spelling.
+#   - A secondmate home inherits the primary's update source through the existing
+#     propagation path, and never inherits the upstream contribution target.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -47,6 +49,12 @@ UPDATE="$ROOT/bin/fm-update.sh"
 # path→family map finds a library's consuming tests by scanning for its basename.
 # shellcheck source=bin/fm-update-source-lib.sh
 . "$ROOT/bin/fm-update-source-lib.sh"
+
+# The inheritance propagation helper, for the one contract below about which of
+# the two choices reaches a secondmate home. Sourced here rather than asserted
+# from the update run because the run never propagates config itself.
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$ROOT/bin/fm-config-inherit-lib.sh"
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -644,6 +652,61 @@ test_source_resolvers_refuse_and_normalize() {
   pass "T19 the update-source resolvers refuse unsafe values and normalize one repository to one identity"
 }
 
+# --- T20: which of the two choices reaches a secondmate home ----------------
+# A fleet self-updates from ONE source, so a secondmate home has to learn the
+# primary's update source through the existing inheritance path; nothing else
+# carries it there, and a secondmate left on origin would quietly run different
+# code from the home that leased it.
+# config/upstream-remote must NOT travel the same path: only the home that ships
+# firstmate's tracked material has an upstream, and a secondmate that inherited
+# a remote name its own checkout does not carry would lose the
+# upstream-contribution check rather than gain it.
+test_secondmate_inherits_the_source_but_not_the_upstream() {
+  local w sm
+  w=$(new_world t20)
+  sm="$w/sm-home"
+
+  # The declared allowlist is the one owner of what propagates, so pin
+  # membership there as well as in the propagation below.
+  case " $FM_INHERITABLE_CONFIG " in
+    *" update-remote "*) : ;;
+    *) fail "config/update-remote must be in FM_INHERITABLE_CONFIG so a fleet self-updates from one source" ;;
+  esac
+  case " $FM_INHERITABLE_CONFIG " in
+    *" upstream-remote "*)
+      fail "config/upstream-remote must not be inherited: a secondmate checkout has no upstream remote to name" ;;
+  esac
+
+  mkdir -p "$w/home/config" "$sm/config"
+  printf 'fork\n' > "$w/home/config/update-remote"
+  printf 'origin\n' > "$w/home/config/upstream-remote"
+
+  propagate_inheritable_config "$w/home/config" "$sm/config" \
+    || fail "propagating the primary's inheritable config failed"
+
+  [ -f "$sm/config/update-remote" ] \
+    || fail "the secondmate home did not inherit config/update-remote"
+  [ "$(cat "$sm/config/update-remote")" = fork ] \
+    || fail "the secondmate home inherited a different update source than the primary"
+  [ ! -e "$sm/config/upstream-remote" ] \
+    || fail "the secondmate home inherited config/upstream-remote"
+
+  # The inherited file is what the secondmate's own resolution then reads, so
+  # its update run follows the same remote the primary does.
+  fm_update_source_remote_var "$sm/config" \
+    || fail "the inherited update source did not resolve in the secondmate home"
+  [ "$FM_UPDATE_SOURCE_REMOTE" = fork ] \
+    || fail "the secondmate home resolved '$FM_UPDATE_SOURCE_REMOTE' instead of the inherited source"
+
+  # And with no upstream inherited, that home has none: every upstream-specific
+  # behavior stays inert there rather than judging by a name it cannot resolve.
+  fm_upstream_contribution_remote_var "$sm/config" \
+    || fail "a secondmate home with no upstream refused instead of reporting none"
+  [ -z "$FM_UPSTREAM_CONTRIBUTION_REMOTE" ] \
+    || fail "a secondmate home reported an upstream contribution target"
+  pass "T20 a secondmate home inherits the update source and never the upstream target"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -661,5 +724,6 @@ test_environment_override_selects_the_source
 test_fetch_is_deduped_per_source_not_per_object_store
 test_unreadable_source_config_falls_back_loudly
 test_source_resolvers_refuse_and_normalize
+test_secondmate_inherits_the_source_but_not_the_upstream
 
 echo "# all fm-update tests passed"

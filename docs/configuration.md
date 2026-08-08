@@ -38,6 +38,7 @@ A target whose checkout has no such remote is skipped and reported by name, exac
 
 `config/upstream-remote` names the upstream open-source project this fork contributes back to.
 It has no default: a home that names none has no upstream, and every upstream-specific behavior below stays inert.
+A file that exists but cannot be read as an ordinary file is treated exactly like an absent one, so those behaviors go inert rather than guessing, and the resolver says so on stderr instead of letting that happen silently.
 It is deliberately not inherited by secondmate homes, because only the home that ships firstmate's tracked material has an upstream to name.
 
 Setting the two depends on how the home's remotes are already arranged, and both arrangements work:
