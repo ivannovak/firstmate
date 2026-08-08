@@ -19,9 +19,11 @@
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   axes chosen by firstmate at intake. A requested effort is either delivered to
+#   the selected harness or refused before launch; it is never silently omitted.
+#   Codex checks an explicit model against its live models_cache.json catalog.
+#   Missing or inconclusive catalog evidence warns and passes the value through so
+#   uncertainty does not block a potentially valid launch or erase the request.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -122,7 +124,11 @@
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
-#   Launch templates live in launch_template() below; placeholders replaced before launch:
+#   Launch templates live in launch_template() below; placeholders replaced before launch
+#   (raw launch commands receive the same substitution):
+#     __MODELFLAG__ the harness-specific model flag resolved from --model (empty when unset)
+#     __EFFORTFLAG__ the harness-specific effort flag resolved from --effort; a requested
+#                  effort is refused when the launch command lacks this placeholder
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
@@ -231,6 +237,9 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+RESUME_REF=
+RESUME_BRANCH=
+BRIEF_OVERRIDE=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -238,6 +247,9 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+RESUME_REF_SET=0
+RESUME_BRANCH_SET=0
+BRIEF_OVERRIDE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -253,6 +265,9 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      resume-ref) RESUME_REF=$a; RESUME_REF_SET=1 ;;
+      resume-branch) RESUME_BRANCH=$a; RESUME_BRANCH_SET=1 ;;
+      brief-override) BRIEF_OVERRIDE=$a; BRIEF_OVERRIDE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -275,6 +290,12 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --resume-ref) want_value=resume-ref ;;
+    --resume-ref=*) RESUME_REF=${a#--resume-ref=}; RESUME_REF_SET=1 ;;
+    --resume-branch) want_value=resume-branch ;;
+    --resume-branch=*) RESUME_BRANCH=${a#--resume-branch=}; RESUME_BRANCH_SET=1 ;;
+    --brief-override) want_value=brief-override ;;
+    --brief-override=*) BRIEF_OVERRIDE=${a#--brief-override=}; BRIEF_OVERRIDE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -286,6 +307,17 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$RESUME_REF_SET" -eq 0 ] || [ -n "$RESUME_REF" ] || { echo "error: --resume-ref requires a non-empty value" >&2; exit 1; }
+[ "$RESUME_BRANCH_SET" -eq 0 ] || [ -n "$RESUME_BRANCH" ] || { echo "error: --resume-branch requires a non-empty value" >&2; exit 1; }
+[ "$BRIEF_OVERRIDE_SET" -eq 0 ] || [ -n "$BRIEF_OVERRIDE" ] || { echo "error: --brief-override requires a non-empty value" >&2; exit 1; }
+if [ "$RESUME_REF_SET" -ne "$RESUME_BRANCH_SET" ] || [ "$RESUME_REF_SET" -ne "$BRIEF_OVERRIDE_SET" ]; then
+  echo "error: --resume-ref, --resume-branch, and --brief-override must be supplied together" >&2
+  exit 1
+fi
+if [ "$RESUME_REF_SET" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: latent resume options apply only to ordinary ship tasks" >&2
+  exit 1
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -628,6 +660,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_LIFECYCLE_LOCK=
+SPAWN_LIFECYCLE_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -699,6 +733,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$SPAWN_LIFECYCLE_LOCK_HELD" = 1 ]; then
+    SPAWN_LIFECYCLE_LOCK_HELD=0
+    fm_lock_release "$SPAWN_LIFECYCLE_LOCK" || true
   fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
@@ -783,6 +821,12 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+SPAWN_LIFECYCLE_LOCK="$STATE/.latent-$ID.lock"
+if ! fm_lock_try_acquire "$SPAWN_LIFECYCLE_LOCK"; then
+  echo "error: task $ID is already in a hibernation, resume, or cleanup transaction" >&2
+  exit 1
+fi
+SPAWN_LIFECYCLE_LOCK_HELD=1
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1055,8 +1099,55 @@ model_flag_for_harness() {
   esac
 }
 
+codex_effort_catalog_result() {  # <model> <effort>
+  local model=$1 effort=$2 codex_home cache result
+  if [ -z "$model" ] || [ "$model" = default ]; then
+    printf '%s\n' unresolved-model
+    return 0
+  fi
+  if [ -n "${CODEX_HOME:-}" ]; then
+    codex_home=$CODEX_HOME
+  elif [ -n "${HOME:-}" ]; then
+    codex_home="$HOME/.codex"
+  else
+    printf '%s\n' unavailable-home
+    return 0
+  fi
+  cache="$codex_home/models_cache.json"
+  if [ ! -r "$cache" ]; then
+    printf 'unavailable-cache\t%s\n' "$cache"
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'unavailable-jq\t%s\n' "$cache"
+    return 0
+  fi
+  result=$(jq -er --arg model "$model" --arg effort "$effort" '
+    [.models[]? | select(.slug == $model)] as $matches
+    | if ($matches | length) != 1 then
+        "absent-model\t\($model)"
+      else
+        [$matches[0].supported_reasoning_levels[]?.effort] as $levels
+        | if ($levels | index($effort)) != null then
+            "supported"
+          else
+            "unsupported\t" + ($levels | join(", "))
+          end
+      end
+  ' "$cache" 2>/dev/null) || {
+    printf 'invalid-cache\t%s\n' "$cache"
+    return 0
+  }
+  printf '%s\n' "$result"
+}
+
+refuse_undeliverable_effort() {  # <harness> <effort> <detail>
+  echo "error: refusing $1 spawn because requested effort '$2' cannot be delivered: $3" >&2
+  return 1
+}
+
 effort_flag_for_harness() {
-  local harness=$1 effort=$2
+  local harness=$1 effort=$2 model=${3:-} catalog_result catalog_detail cache
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
   case "$harness" in
     claude)
@@ -1065,20 +1156,54 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+      # Codex effort support is model-specific and changes independently of this
+      # script. The live cache is authoritative when it has one exact model row.
+      # Unknown evidence is not a contradiction: pass the requested config through
+      # with a warning so Codex can accept a newly added level instead of fm-spawn
+      # silently replacing it with the model default.
+      catalog_result=$(codex_effort_catalog_result "$model" "$effort")
+      catalog_detail=${catalog_result#*$'\t'}
+      case "$catalog_result" in
+        supported) ;;
+        unsupported$'\t'*)
+          cache="${CODEX_HOME:-${HOME:+$HOME/.codex}}/models_cache.json"
+          refuse_undeliverable_effort codex "$effort" \
+            "model '$model' advertises only ${catalog_detail:-no reasoning levels} in $cache"
+          return 1
+          ;;
+        unresolved-model)
+          echo "warning: Codex effort '$effort' cannot be preflighted without an explicit model; passing model_reasoning_effort through for Codex to validate" >&2
+          ;;
+        absent-model$'\t'*)
+          echo "warning: Codex model '$model' is absent from the live model catalog; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        unavailable-cache$'\t'*)
+          echo "warning: Codex model catalog is unavailable at '$catalog_detail'; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        unavailable-jq$'\t'*)
+          echo "warning: jq is unavailable, so Codex model '$model' cannot be checked against '$catalog_detail'; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        invalid-cache$'\t'*)
+          echo "warning: Codex model catalog at '$catalog_detail' is invalid; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        unavailable-home)
+          echo "warning: neither CODEX_HOME nor HOME identifies the Codex model catalog; passing requested effort '$effort' through for Codex to validate" >&2
+          ;;
+        *)
+          echo "error: refusing codex spawn because its model-catalog result was not understood: $catalog_result" >&2
+          return 1
+          ;;
       esac
+      printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
       ;;
     grok)
       # grok exposes both --effort and --reasoning-effort; firstmate's profile
       # axis is the reasoning knob. As of grok 0.2.99, --reasoning-effort accepts
-      # only low|medium|high and rejects both xhigh and max, so omit those rather
-      # than passing a known-bad value.
+      # only low|medium|high and rejects both xhigh and max, so refuse those before
+      # endpoint creation rather than launching at Grok's default.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+        *) refuse_undeliverable_effort grok "$effort" "the verified reasoning-effort ceiling is high"; return 1 ;;
       esac
       ;;
     pi|pi-signed)
@@ -1102,13 +1227,38 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command.
+    opencode)
+      refuse_undeliverable_effort opencode "$effort" \
+        "its interactive launch has no verified effort flag"
+      return 1
+      ;;
+    kimi)
+      refuse_undeliverable_effort kimi "$effort" "it has no reasoning-effort flag"
+      return 1
+      ;;
+    *)
+      refuse_undeliverable_effort "${harness:-unknown harness}" "$effort" \
+        "no verified effort flag exists for this launch path"
+      return 1
+      ;;
   esac
 }
+
+# Resolve profile flags before binary-specific setup, project allocation, endpoint
+# creation, or metadata publication. A known-undeliverable effort therefore refuses
+# without leaving side effects or a durable record that falsely claims it launched.
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+if [ -n "$EFFORTFLAG" ]; then
+  case "$LAUNCH" in
+    *__EFFORTFLAG__*) ;;
+    *)
+      refuse_undeliverable_effort "$HARNESS" "$EFFORT" \
+        "this launch command has no __EFFORTFLAG__ placeholder to receive it"
+      exit 1
+      ;;
+  esac
+fi
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -1326,6 +1476,18 @@ else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+fi
+if [ "$BRIEF_OVERRIDE_SET" -eq 1 ]; then
+  EXPECTED_RESUME_BRIEF="$DATA/$ID/latent/resume-brief.md"
+  if [ "$BRIEF_OVERRIDE" != "$EXPECTED_RESUME_BRIEF" ] || [ ! -f "$BRIEF_OVERRIDE" ] || [ -L "$BRIEF_OVERRIDE" ]; then
+    echo "error: latent resume brief must be the regular task-owned file $EXPECTED_RESUME_BRIEF" >&2
+    exit 1
+  fi
+  case "$RESUME_REF" in refs/firstmate/latent-resume/"$ID".*) ;; *) echo "error: latent resume ref is outside this task's namespace" >&2; exit 1 ;; esac
+  git check-ref-format "$RESUME_REF" >/dev/null 2>&1 || { echo "error: latent resume ref is malformed" >&2; exit 1; }
+  git check-ref-format "refs/heads/$RESUME_BRANCH" >/dev/null 2>&1 || { echo "error: latent resume branch is malformed" >&2; exit 1; }
+  git -C "$PROJ_ABS" rev-parse --verify "$RESUME_REF^{commit}" >/dev/null 2>&1 || { echo "error: latent resume ref is unavailable in the project repository" >&2; exit 1; }
+  BRIEF=$BRIEF_OVERRIDE
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
@@ -1868,6 +2030,48 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+if [ "$RESUME_REF_SET" -eq 1 ]; then
+  RESUME_OID=$(git -C "$PROJ_ABS" rev-parse --verify "$RESUME_REF^{commit}" 2>/dev/null) || {
+    echo "error: latent resume ref disappeared before branch reconstruction" >&2
+    exit 1
+  }
+  if git -C "$PROJ_ABS" worktree list --porcelain \
+      | grep -Fxq "branch refs/heads/$RESUME_BRANCH"; then
+    echo "error: latent resume branch is unexpectedly checked out in another worktree" >&2
+    exit 1
+  fi
+  RESUME_OLD_BRANCH=$(git -C "$PROJ_ABS" rev-parse --verify "refs/heads/$RESUME_BRANCH^{commit}" 2>/dev/null || true)
+  if [ -n "$RESUME_OLD_BRANCH" ]; then
+    RESUME_SAVED_REF="refs/firstmate/latent/$ID"
+    RESUME_SAVED_OID=$(git -C "$PROJ_ABS" rev-parse --verify "$RESUME_SAVED_REF^{commit}" 2>/dev/null) || {
+      echo "error: saved latent generation is unavailable while moving the task branch" >&2
+      exit 1
+    }
+    git -C "$PROJ_ABS" merge-base --is-ancestor "$RESUME_OLD_BRANCH" "$RESUME_SAVED_OID" 2>/dev/null || {
+      echo "error: local task branch contains history outside the saved latent generation" >&2
+      exit 1
+    }
+    git -C "$PROJ_ABS" update-ref "refs/heads/$RESUME_BRANCH" "$RESUME_OID" "$RESUME_OLD_BRANCH" || {
+      echo "error: latent resume branch changed concurrently" >&2
+      exit 1
+    }
+  else
+    RESUME_ZERO_OID=$(printf '%*s' "${#RESUME_OID}" '' | tr ' ' 0)
+    git -C "$PROJ_ABS" update-ref "refs/heads/$RESUME_BRANCH" "$RESUME_OID" "$RESUME_ZERO_OID" || {
+      echo "error: latent resume branch appeared concurrently" >&2
+      exit 1
+    }
+  fi
+  git -C "$WT" checkout --quiet "$RESUME_BRANCH" || {
+    echo "error: reconstructed latent branch could not be checked out" >&2
+    exit 1
+  }
+  [ "$(git -C "$WT" rev-parse --verify HEAD)" = "$RESUME_OID" ] || {
+    echo "error: reconstructed latent branch head does not match the authenticated pull request head" >&2
+    exit 1
+  }
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2235,8 +2439,6 @@ sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}

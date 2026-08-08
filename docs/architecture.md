@@ -9,7 +9,7 @@ firstmate's always-loaded operating contract and routing index for conditional p
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
-Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or a Relay mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
+Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR polling or a Relay mention, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
 A busy pane is otherwise exempt from staleness, but only until its latest `state/<id>.turn-ended` marker reaches `FM_BUSY_TURN_MAX_SECS`, or its `state/<id>.meta` spawn record reaches that age before any turn completes; past that bound it is routed through the same wedge escalation, with the identical reason, escalation count, and `demand-deep-inspection` marker, for inspection only - never an automatic interrupt, signal, or restart.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
@@ -17,6 +17,10 @@ When a canonical validated PR poll returns exactly `merged`, the watcher appends
 The receipt makes retirement safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves task metadata including `pr=` and `pr_head=`.
 A concurrent replacement remains armed, every non-merged or invalid observation remains unchanged, and retirement never performs task or persistent-secondmate cleanup.
 `bin/fm-pr-lib.sh` owns the receipt format and strict identity mechanics, while `bin/fm-watch.sh` owns queue-before-retirement ordering.
+The same poll also reports a GitHub pull request's current review-activity totals and newest activity instant, so a review or comment wakes firstmate instead of waiting on a merge that may never come; a GitLab merge request keeps merge state only.
+That report is a stateless observation rather than a terminal event, because a check is invoked with no task identity and must never write task state, so `bin/fm-pr-lib.sh` owns the per-task cursor that suppresses an unchanged repeat: `bin/fm-pr-check.sh` seeds it at arming so only later activity wakes, the watcher advances it only after the wake is durably queued, and teardown removes it.
+Unlike `merged`, that line does not end the sweep; its wake is queued and reported after the loop, so a merge on a later poll is still observed in the same cycle.
+Only validated counts and one validated instant reach the wake line, never a string the pull request's authors control, and [PR review-activity watch verification](verification/pr-review-activity.md) owns the forge-CLI evidence the projection depends on.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
@@ -33,6 +37,8 @@ Because of that, a per-wake read of only the latest line can bury an earlier sti
 The explicit resolution is written by the actor that answers, not the busy worker: `fm-send`'s `--resolve-key` appends the closing `resolved` line to this home's own copy of the ledger at answer time, which covers crewmates, local secondmates, and remote secondmates identically because a remote mate's escalations reach that local copy through the parent-replies ingest and only the answer message itself crosses the transport.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a no-mistakes run, active or terminal, only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
 The script header owns the exact run-head ancestry rules.
+A terminal pass is only as strong as the delivery steps behind it: when the run's steps table shows a skipped `pr` or `ci` step, the read reports failed naming the evidence that does not exist rather than done, because the pipeline still reports `outcome=passed` when its daemon's unauthenticated `gh` silently skips those steps.
+The coarse `no-mistakes runs` list fallback carries no steps table at all, so a terminal row from it reports unknown rather than done: that source cannot certify what the run delivered.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
@@ -147,7 +153,8 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 `fm-tangle-lib.sh` resolves the default branch from `origin/HEAD`, then local `main` or `master`, and classifies that named non-default primary branch as the tangle.
 `fm-guard.sh` prints the repair command on the next mutable fleet action, while `bin/fm-session-start.sh` reports the same condition through bootstrap as a `TANGLE:` line at session start.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
-Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
+Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating the branch named by `bin/fm-branch-lib.sh`, then stop with a blocked status if it landed in the primary checkout.
+New task branches use `ivannovak/dev-<ticket>` for ticketed task ids and `ivannovak/dev-000-<task-id>` for unticketed work; existing `fm/` branches remain readable and are not migrated.
 
 ## No-mistakes gate authority boundary
 
@@ -170,8 +177,8 @@ The shell scripts validate the JSON shape and verified harness/effort combinatio
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
-Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
-That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, and muse while preserving the requested profile for later audit.
+A requested effort is either delivered to the selected harness's launch or refused by `fm-spawn.sh` before endpoint creation and task metadata; it is never silently omitted from the launch while meta claims it applied.
+Codex effort support is model-specific and resolved from its live model catalog at spawn time; when the catalog or exact model cannot be verified, `fm-spawn.sh` warns and passes the requested value through for Codex itself to validate.
 
 ## Optional secondmates
 
@@ -229,6 +236,22 @@ PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and an
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
+
+## Finished PR workers can hibernate without becoming finished tasks
+
+[`bin/fm-latent.sh`](../bin/fm-latent.sh) owns the latent manifest, transaction journal, `refs/firstmate/latent/<task-id>` recovery namespace, entry proof, restart recovery, rehydration, and merge-finalization handoff.
+A successful GitHub ready registration records `pr_ready_head=` equal to `pr_head=` as the durable entry trigger, so a later status append cannot silently cancel eligibility.
+A GitHub PR task enters `latent` only after that ready identity, its canonical poll, and the authenticated open head agree, the exact PR object is fetched and pinned, local `HEAD` is equal to or an ancestor of that object, the shared cleanliness check passes, no keyed decision or registered obligation remains, no validation run is active or parked, and the recorded endpoint is terminated under task and endpoint locks.
+The same Git, decision, obligation, metadata, and ref checks run again after termination before a plain identity-checked Treehouse return, and metadata becomes endpoint-free only after that return succeeds.
+Any false or unknown predicate leaves the task active, while an interrupted transaction either rolls back before return, completes the metadata commit after a confirmed return, or reports `quarantined` when identities no longer agree.
+`latent` therefore means zero worker process and zero Treehouse slot but not task completion: the metadata, status history, brief, PR poll, manifest, and protected commit remain.
+The authenticated PR poll uses its existing watcher path to surface merge, closed-unmerged, exact head change, and changes-requested transitions, and the latter three retain the recovery ref until rehydration or an explicit abandonment decision.
+Rehydration creates a fresh worker and reconstructs context from Git, the original instructions, the PR, review feedback, and durable history rather than claiming to restore model conversation or a live validation prompt.
+Neither `paused:` nor watcher pause markers participate in the tier predicate.
+A declared pause is only the last status verb, so any later append, including benign `resolved:` bookkeeping from another writer, cancels pause classification and may resume bare stale notifications.
+The sealed manifest, protected ref, and endpoint-free metadata are the steady-state predicate instead.
+Only [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) finalizes a latent task, and it still requires an exact merged head containing the saved generation before deleting the ref and durable task records.
+The protected ref survives slot reuse and remote branch deletion or force-push, but it is not an off-host backup: deleting or corrupting the project clone can still destroy its object database, so project removal preflight refuses latent manifests or refs.
 
 ## Optional Relay
 

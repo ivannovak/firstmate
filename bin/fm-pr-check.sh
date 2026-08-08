@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# exact pr_head=<sha> when available, then atomically arm a static PR poll and
+# seed its review-activity cursor so only activity arriving after arming wakes
+# firstmate.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -78,6 +80,31 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
+# Seed the review-activity cursor from the poll itself, so only activity that
+# arrives after arming wakes firstmate rather than every bot comment a pull
+# request already carries by the time its checks go green. The poll owns the
+# query; this only stores what it reports right now. When it reports no usable
+# starting point the cursor is cleared instead of inherited, because one extra
+# wake is always preferable to a stale cursor suppressing a real one. A cursor
+# that cannot be written is cleared for the same reason and more urgently: left
+# alone it would be rejected on every sweep from here on, and the unchanged
+# activity behind it would wake firstmate every CHECK_INTERVAL forever.
+# Only GitHub reports review activity, so only GitHub pays for the lookup:
+# arming a GitLab merge request makes no forge call here.
+FM_PR_ACTIVITY_PENDING=
+if [ "$PROVIDER" = github ]; then
+  FM_PR_ACTIVITY_PENDING=$("$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+    "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" 2>/dev/null || true)
+fi
+case "$FM_PR_ACTIVITY_PENDING" in
+  'review-activity '*)
+    fm_pr_activity_commit "$STATE" "$ID" \
+      || fm_pr_activity_cursor_clear "$STATE" "$ID" || true
+    ;;
+  *) FM_PR_ACTIVITY_PENDING=; fm_pr_activity_cursor_clear "$STATE" "$ID" || true ;;
+esac
+FM_PR_ACTIVITY_PENDING=
+
 META_TMP=
 pr_check_cleanup() {
   fm_pr_poll_cleanup
@@ -94,12 +121,14 @@ STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    pr=*|pr_head=*) ;;
+    pr=*|pr_head=*|pr_ready_head=*) ;;
     *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
   esac
 done < "$META"
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
-[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+if [ -n "$PR_HEAD" ]; then
+  printf 'pr_head=%s\npr_ready_head=%s\n' "$PR_HEAD" "$PR_HEAD" >> "$META_TMP" || exit 1
+fi
 chmod 0600 "$META_TMP" || exit 1
 fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1
@@ -119,4 +148,16 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+
+# A successful GitHub ready registration is the durable entry trigger.
+# The hibernation command still owns every eligibility proof and leaves the
+# worker active on any refusal.  A local off preference suppresses only this
+# automatic attempt, never the explicit command.
+LATENT_PREFERENCE=
+if [ -f "$FM_HOME/config/latent-workers" ] && [ ! -L "$FM_HOME/config/latent-workers" ]; then
+  LATENT_PREFERENCE=$(tr -d '[:space:]' < "$FM_HOME/config/latent-workers" 2>/dev/null || true)
+fi
+if [ -n "$PR_HEAD" ] && { [ -z "$LATENT_PREFERENCE" ] || [ "$LATENT_PREFERENCE" = on ]; }; then
+  "$SCRIPT_DIR/fm-latent.sh" enter "$ID" >/dev/null 2>&1 || true
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

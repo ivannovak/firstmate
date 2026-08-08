@@ -928,6 +928,48 @@ SH
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
 }
 
+# Latent transaction recovery is the one mutating sweep whose placement is easy
+# to get wrong, because the hibernation lifecycle it belongs to is otherwise
+# network-driven. `recover-all` itself is purely local - it reconciles an
+# interrupted hibernation against local refs and the local manifest - so it must
+# run on the LOCAL half, where the fleet-state digest that reports that task's
+# endpoint can still see its result. Wiring it to the network half instead
+# leaves it installed but invisible to the digest, and dropping it entirely
+# leaves the whole hibernation lifecycle inert. Both regressions are silent
+# without this test, so it pins the sweep to the local half and asserts the
+# network half does NOT repeat it.
+test_latent_recovery_sweep_runs_on_the_local_half() {
+  local case_dir fakebin skip_out only_out detect_out
+  case_dir="$TMP_ROOT/latent-phase"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  mkdir -p "$case_dir/home/data/fm-latent-phase-probe/latent"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  # A transaction journal that cannot reconcile is the cheapest observable proof
+  # that the sweep actually ran: fm-latent.sh reports it as quarantined.
+  printf 'phase\tstarted\n' \
+    > "$case_dir/home/data/fm-latent-phase-probe/latent/transaction"
+
+  skip_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_contains "$skip_out" "LATENT_RECOVERY: quarantined fm-latent-phase-probe" \
+    "the local half did not run latent transaction recovery"
+
+  only_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_not_contains "$only_out" "LATENT_RECOVERY" \
+    "the deferred network half repeated latent transaction recovery"
+
+  # A lock-refused read-only session must not mutate anything, including a
+  # half-applied hibernation transaction owned by the session holding the lock.
+  detect_out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1)
+  assert_not_contains "$detect_out" "LATENT_RECOVERY" \
+    "a detect-only session ran latent transaction recovery"
+
+  pass "bootstrap: latent transaction recovery runs on the local half only"
+}
+
 test_network_sweeps_recheck_lock_ownership() {
   local case_dir fakebin fake_root marker out
   case_dir="$TMP_ROOT/network-lock-handoff"
@@ -1118,7 +1160,7 @@ test_crew_dispatch_validation() {
   done <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
-unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+codex max effort is accepted for live per-model validation at spawn^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-sol","effort":"max"}}]}^empty^
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
@@ -1137,7 +1179,7 @@ empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CRE
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
 array profile with malformed model is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","model":5}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings when present
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
-array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+array profile codex max effort is accepted for live validation at spawn^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^empty^
 empty default array is flagged^{"default":[]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default needs at least one profile
 non-object default array entry is flagged^{"default":["codex"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile must be an object
 default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each default profile needs harness
@@ -1169,6 +1211,7 @@ test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
+test_latent_recovery_sweep_runs_on_the_local_half
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
