@@ -63,6 +63,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-project-mode.sh`     | Resolve a project's registered delivery posture from `data/projects.md` for fleet sync and home seeding |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
+| `fm-branch-lib.sh`       | Shared new-task branch naming and legacy-branch resolution                           |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
 | `fm-pending-reply-lib.sh` | Parent-owned secondmate pending-reply expectations, recovery, and keyed escalation lifecycle |
 | `fm-secondmate-report.sh` | Optional helper to append a correlated parent status or document-pointer report       |
@@ -101,7 +102,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
+| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static PR poll   |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
