@@ -30,11 +30,13 @@
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      checks-passed -> done, failed/cancelled -> failed. Terminal passed ->
-#      done, claiming a merge only when the ci step ran to completion; passed
-#      with its pr or ci steps skipped -> unknown, because the pipeline
-#      observed no merge and the work must be treated as UNLANDED (the
-#      passed-outcome mapping below owns the dated evidence). EXCEPT: while
+#      passed/checks-passed -> done, failed/cancelled -> failed. A terminal
+#      pass with a SKIPPED pr or ci step reports failed instead of done
+#      (see nm_skipped_delivery_steps): the pipeline reaches outcome=passed
+#      with those steps silently skipped when its daemon's gh is
+#      unauthenticated, so the evidence each skipped step would have produced
+#      does not exist behind such a pass (see nm_missing_delivery_evidence).
+#      EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
@@ -253,23 +255,42 @@ log_reports_ci_ready() {
   esac
 }
 
+# A terminal outcome is only as strong as the delivery steps behind it.
+# Verified 2026-08-06 against the installed v1.41.2 binary (real run
+# 01KZBCA6DEHQC1404F34QJE0CC): when the pipeline daemon's gh is unauthenticated
+# it SKIPS the pr and ci steps ("skipping PR creation: gh CLI is not
+# authenticated" in the step log) yet still reports outcome=passed, so a run
+# can "pass" having never opened a PR and never observed a CI check. Echoes the
+# skipped delivery step names (pr/ci) from the steps[] table, one per line;
+# empty when none are skipped.
+nm_skipped_delivery_steps() {
+  printf '%s\n' "$RUN_OUT" \
+    | sed -n -E 's/^[[:space:]]*(pr|ci),[[:space:]]*"?skipped"?[[:space:]]*,.*/\1/p'
+}
+
+# Names ONLY the evidence that is actually missing, derived from which delivery
+# steps were skipped: a skipped pr step means no pull request was ever opened, a
+# skipped ci step means no CI check was ever observed. The distinction matters -
+# a run can skip ci alone while its pr step completed and a real PR URL exists,
+# and claiming no PR evidence there would steer an operator away from a pull
+# request that really is open. Takes the slash-joined list from
+# nm_skipped_delivery_steps.
+nm_missing_delivery_evidence() {  # <slash-joined skipped steps>
+  local pr_skipped=0 ci_skipped=0
+  case "/$1/" in *"/pr/"*) pr_skipped=1 ;; esac
+  case "/$1/" in *"/ci/"*) ci_skipped=1 ;; esac
+  if [ "$pr_skipped" = 1 ] && [ "$ci_skipped" = 1 ]; then
+    printf 'no pull request was opened and no CI check was observed'
+  elif [ "$pr_skipped" = 1 ]; then
+    printf 'no pull request was opened'
+  elif [ "$ci_skipped" = 1 ]; then
+    printf 'no CI check was observed'
+  fi
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
-  [ -n "$row" ] || return 0
-  row=$(trim "$row")
-  rest=${row#*,}
-  strip_quotes "$(trim "${rest%%,*}")"
-}
-
-# Status token of one named step from the steps[N]{step,status,...} table in
-# $RUN_OUT; empty when the step (or the whole table) is absent. Unlike
-# nm_ci_step_status this reads ANY status, including terminal ones
-# (completed/skipped), because the passed-outcome mapping below must know
-# whether the delivery steps actually ran.
-nm_step_status() {  # <step>
-  local row rest
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E "^[[:space:]]*$1,[[:space:]]*[^,]+," | head -1)
   [ -n "$row" ] || return 0
   row=$(trim "$row")
   rest=${row#*,}
@@ -296,10 +317,7 @@ nm_effective_ci_step_status() {
 # to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
 # reports every check green - it only reaches outcome=passed once the PR is
-# actually merged (or failed/cancelled if closed) WHEN the ci step actually
-# runs; a run whose pr/ci steps were skipped still reports outcome=passed with
-# no merge behind it (see the passed-outcome mapping below for the evidence).
-# `axi status`'s steps[] table
+# actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
 # never distinguishes "still waiting on checks" from "checks green, waiting on
 # merge": both read as plain `ci,running,...`. The only place that transition is
 # recorded is the ci step's own log text, e.g. "all CI checks passed - still
@@ -444,15 +462,25 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
-    # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
+    # working, failed, or an uncertifiable terminal (unknown). A crew genuinely
+    # parked at a gate still gets full detail once `axi status` reports its own
+    # branch again (e.g. once its own step is the most-recently-touched one),
+    # and its own needs-decision/blocked status-log append (a captain-relevant
+    # VERB) is surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
+    #
+    # A coarse `completed` row deliberately does NOT report done. The runs list
+    # carries no steps[] table, so nm_skipped_delivery_steps has nothing to read
+    # and there is zero delivery-step evidence behind that row - a run that
+    # skipped its pr and ci steps looks exactly like a genuinely delivered one
+    # here. Calling it done would reopen, on this path alone, the very bypass
+    # the skipped-delivery guard exists to close, so an honest unknown is the
+    # correct verdict: the run is terminal, but this source cannot certify what
+    # it delivered. The failed/cancelled arms need no such evidence - a run that
+    # did not pass cannot have delivered anything to over-trust.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+      completed) RUN_STATE=unknown; RUN_DETAIL="terminal run found via the runs list, which carries no delivery-step evidence: done cannot be certified (check axi status for this branch's own run)" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
@@ -468,32 +496,16 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        # outcome=passed does NOT by itself prove a merge. Verified 2026-08-05
-        # (run 01KZA3FQXT8C754JF3BYVSCV65, v1.41.2, auctic-phpstan-never-loaded
-        # incident): the pipeline reached outcome=passed with its pr and ci
-        # steps SKIPPED (daemon gh unauthenticated), so no PR was ever opened,
-        # yet this mapping claimed "PR merged/closed" - the exact precondition
-        # for tearing down UNLANDED work. Claim a merge only when the ci step
-        # ran to completion (its monitor exits on merge/close); flag skipped
-        # delivery steps as unknown so the wake surfaces instead of absorbing.
-        passed)
-          pr_step=$(nm_step_status pr)
-          ci_step=$(nm_step_status ci)
-          skipped_steps=""
-          [ "$pr_step" = skipped ] && skipped_steps="pr"
-          [ "$ci_step" = skipped ] && skipped_steps="${skipped_steps:+$skipped_steps,}ci"
-          if [ -n "$skipped_steps" ]; then
-            RUN_STATE=unknown
-            RUN_DETAIL="run passed but delivery steps skipped ($skipped_steps): pipeline observed no merge - treat work as UNLANDED"
-          elif [ "$ci_step" = completed ]; then
-            RUN_STATE="done"
-            RUN_DETAIL="run passed: PR merged/closed"
+        passed|checks-passed)
+          SKIPPED_DELIVERY=$(nm_skipped_delivery_steps | paste -sd/ -)
+          if [ -n "$SKIPPED_DELIVERY" ]; then
+            RUN_STATE=failed
+            RUN_DETAIL="run reported $outcome but skipped delivery step(s) $SKIPPED_DELIVERY: $(nm_missing_delivery_evidence "$SKIPPED_DELIVERY"), do not trust the pass (daemon gh auth?)"
+          elif [ "$outcome" = passed ]; then
+            RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed"
           else
-            RUN_STATE="done"
-            RUN_DETAIL="run passed (merge not observed by pipeline steps)"
-          fi
-          ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+            RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"
+          fi ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
@@ -517,7 +529,14 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        completed)
+          SKIPPED_DELIVERY=$(nm_skipped_delivery_steps | paste -sd/ -)
+          if [ -n "$SKIPPED_DELIVERY" ]; then
+            RUN_STATE=failed
+            RUN_DETAIL="run completed but skipped delivery step(s) $SKIPPED_DELIVERY: $(nm_missing_delivery_evidence "$SKIPPED_DELIVERY") (daemon gh auth?)"
+          else
+            RUN_STATE="done"; RUN_DETAIL="run completed"
+          fi ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
         cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
