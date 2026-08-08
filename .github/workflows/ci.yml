@@ -138,6 +138,19 @@ jobs:
             exit 1
           }
           tmux -V
+      - name: Install pinned Treehouse
+        run: |
+          set -eu
+          # tests/fm-latent.test.sh acquires a real leased worktree to exercise
+          # the hibernation Treehouse return, and it runs in this serial lane
+          # rather than the Herdr lane. Installing treehouse here keeps that
+          # coverage REAL: without it the suite has no tool to gate-skip on and
+          # fails, and gate-skipping it instead would leave hibernation's
+          # lifecycle untested in CI.
+          bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
+          treehouse --version
       - name: Install tasks-axi for backlog-handoff delegation
         run: |
           set -eu

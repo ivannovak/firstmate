@@ -75,6 +75,11 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   # fm-wake-lib.sh: teardown sources it for serialized secondmate lifecycle locks.
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  # fm-task-safety-lib.sh: teardown sources this at startup too. A fake root
+  # missing a lib the real script sources makes that source a FATAL abort under
+  # set -e, which teardown's EXIT-trap sentinel then correctly reports as a
+  # non-zero exit - so a gap here reads as a teardown bug, not a fixture one.
+  ln -s "$ROOT/bin/fm-task-safety-lib.sh" "$fake/bin/fm-task-safety-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -151,6 +156,11 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
+  # fm-task-safety-lib.sh: teardown sources this at startup too. A fake root
+  # missing a lib the real script sources makes that source a FATAL abort under
+  # set -e, which teardown's EXIT-trap sentinel then correctly reports as a
+  # non-zero exit - so a gap here reads as a teardown bug, not a fixture one.
+  ln -s "$ROOT/bin/fm-task-safety-lib.sh" "$fake/bin/fm-task-safety-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
