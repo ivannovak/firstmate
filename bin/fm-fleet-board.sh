@@ -135,6 +135,32 @@ now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 now_epoch() { date -u +%s; }
 
+# GNU stat treats -f as a filesystem-report command, so a BSD-first
+# `stat -f ... || stat -c ...` chain writes a report for every operand to STDOUT
+# and only then fails, leaving the fallback's real output appended to garbage
+# whose free-block counts drift between calls. That would make this script's
+# whole freshness gate non-deterministic and would feed prose into the lock-age
+# arithmetic. Select the platform syntax once, as bin/fm-fleet-snapshot.sh and
+# bin/fm-supervise-daemon.sh already do.
+if [ "$(uname 2>/dev/null || true)" = Darwin ]; then
+  stat_mtime_raw() { stat -f '%m' "$1" 2>/dev/null; }
+  stat_path_mtime_size() { stat -f '%N %m %z' "$@" 2>/dev/null; }
+else
+  stat_mtime_raw() { stat -c '%Y' "$1" 2>/dev/null; }
+  stat_path_mtime_size() { stat -c '%n %Y %s' "$@" 2>/dev/null; }
+fi
+
+# Always a plain number, so an unreadable path cannot break the arithmetic that
+# consumes it.
+stat_mtime_epoch() {  # <path>
+  local m
+  m=$(stat_mtime_raw "$1" || true)
+  case "$m" in
+    ''|*[!0-9]*) printf '0\n' ;;
+    *) printf '%s\n' "$m" ;;
+  esac
+}
+
 # --- change detection -------------------------------------------------------
 # Cheap enough to run on every watcher poll: it stats the authoritative inputs
 # and hashes the small backlog files, and never runs the canonical snapshot.
@@ -180,7 +206,7 @@ fingerprint_home() {  # <data-dir> <state-dir> <label>
     shopt -s nullglob
     set -- "$state"/*.meta "$state"/*.status
     [ "$#" -gt 0 ] || exit 0
-    stat -f '%N %m %z' "$@" 2>/dev/null || stat -c '%n %Y %s' "$@" 2>/dev/null || true
+    stat_path_mtime_size "$@" || true
   ) | sort | awk -v label="$label" '{ print label "\t" $0 }'
 }
 
@@ -680,8 +706,7 @@ render_html() {  # <model-json-path>
 claim_rebuild() {
   local age
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    age=$(( $(now_epoch) - $(stat -f '%m' "$LOCK_DIR" 2>/dev/null \
-      || stat -c '%Y' "$LOCK_DIR" 2>/dev/null || echo 0) ))
+    age=$(( $(now_epoch) - $(stat_mtime_epoch "$LOCK_DIR") ))
     if [ "$age" -lt "$FM_BOARD_LOCK_STALE" ]; then
       return 1
     fi
@@ -883,7 +908,7 @@ cmd_unserve() {
 cmd_status() {
   local out=$1 epoch age
   if [ -f "$out" ]; then
-    epoch=$(stat -f '%m' "$out" 2>/dev/null || stat -c '%Y' "$out" 2>/dev/null || echo 0)
+    epoch=$(stat_mtime_epoch "$out")
     age=$(( $(now_epoch) - epoch ))
     echo "board: $out"
     echo "age: ${age}s"

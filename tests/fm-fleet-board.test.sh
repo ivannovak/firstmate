@@ -496,6 +496,141 @@ EOF
   pass "the change-detection walk resolves registry records through their one owner"
 }
 
+# A stat dialect this machine is not running, forced onto PATH together with the
+# uname the script selects on, so both branches are exercised wherever the suite
+# runs. Each shim accepts ONLY its own format flag and reproduces what the other
+# platform's stat really does with a foreign one: GNU prints a filesystem report
+# to stdout for every operand and exits 1, and that report carries a free-block
+# count that moves between calls.
+make_stat_shim() {  # <dir> <bsd|gnu> -> echoes the shim bin directory
+  local fb=$1/statshim-$2 host
+  mkdir -p "$fb"
+  printf '%s\n' "$2" > "$fb/.dialect"
+  # Where the real tools are, resolved before PATH is bent, so the shim can
+  # delegate without finding itself.
+  command -v stat > "$fb/.realstat"
+  command -v uname > "$fb/.realuname"
+  if [ "$(uname -s)" = Darwin ]; then host=-f; else host=-c; fi
+  printf '%s\n' "$host" > "$fb/.host"
+  case "$2" in
+    bsd) printf 'Darwin\n' > "$fb/.os" ;;
+    *) printf 'Linux\n' > "$fb/.os" ;;
+  esac
+  cat > "$fb/uname" <<'SH'
+#!/usr/bin/env bash
+set -u
+here=$(dirname "$0")
+case "${1:-}" in
+  ''|-s) cat "$here/.os" ;;
+  *) exec "$(cat "$here/.realuname")" "$@" ;;
+esac
+SH
+  cat > "$fb/stat" <<'SH'
+#!/usr/bin/env bash
+set -u
+here=$(dirname "$0")
+dialect=$(cat "$here/.dialect")
+host=$(cat "$here/.host")
+printf '%s\n' "$*" >> "${FM_FAKE_STAT_LOG:?}"
+
+if [ "$dialect" = gnu ]; then own=-c; else own=-f; fi
+
+if [ "${1:-}" != "$own" ]; then
+  # A foreign format flag. GNU reads -f as --file-system and still writes a
+  # report for every real operand to stdout before failing, and that report
+  # carries free-block counts that move; BSD simply refuses.
+  if [ "$dialect" = gnu ] && [ "${1:-}" = -f ]; then
+    drift=$(( $(cat "$here/.drift" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$drift" > "$here/.drift"
+    shift 2 2>/dev/null || true
+    for f in "$@"; do
+      printf '  File: "%s"\nBlocks: Total: 975653540  Free: %s Available: %s\n' \
+        "$f" "$drift" "$drift"
+    done
+  fi
+  exit 1
+fi
+
+shift
+fmt=$1
+shift
+if [ "$own" != "$host" ]; then
+  if [ "$host" = -c ]; then
+    fmt=$(printf '%s' "$fmt" | sed -e 's/%Lp/%a/g' -e 's/%N/%n/g' -e 's/%m/%Y/g' -e 's/%z/%s/g')
+  else
+    fmt=$(printf '%s' "$fmt" | sed -e 's/%a/%Lp/g' -e 's/%n/%N/g' -e 's/%Y/%m/g' -e 's/%s/%z/g')
+  fi
+fi
+exec "$(cat "$here/.realstat")" "$host" "$fmt" "$@"
+SH
+  chmod +x "$fb/uname" "$fb/stat"
+  printf '%s\n' "$fb"
+}
+
+# The fingerprint is the whole freshness gate, so it has to mean the same thing
+# under either stat dialect: identical inputs must hash identically however much
+# unrelated disk activity happens between two reads, and a real state event must
+# still move it.
+test_fingerprint_is_identical_under_either_stat_dialect() {
+  local home dialect fb a b c
+  for dialect in bsd gnu; do
+    home=$(make_home "stat-dialect-$dialect")
+    write_mixed_backlog "$home"
+    printf 'window=firstmate:fm-one\nkind=ship\n' > "$home/state/one.meta"
+    printf 'working: one is under way\n' > "$home/state/one.status"
+    fb=$(make_stat_shim "$home" "$dialect")
+    : > "$home/stat.log"
+
+    a=$(PATH="$fb:$PATH" FM_FAKE_STAT_LOG="$home/stat.log" FM_HOME="$home" "$BOARD" fingerprint) \
+      || fail "$dialect: fingerprint failed under a $dialect stat"
+    [ -n "$a" ] || fail "$dialect: fingerprint produced nothing"
+    [ -s "$home/stat.log" ] \
+      || fail "$dialect: the $dialect stat shim was never invoked, so this proves nothing"
+
+    # Unrelated disk activity only. Nothing the board reads has changed, so the
+    # gate must not move; a filesystem report would drift here and a per-file
+    # metadata read cannot.
+    dd if=/dev/zero of="$home/ballast" bs=1024 count=64 >/dev/null 2>&1 || true
+    b=$(PATH="$fb:$PATH" FM_FAKE_STAT_LOG="$home/stat.log" FM_HOME="$home" "$BOARD" fingerprint)
+    [ "$a" = "$b" ] \
+      || fail "$dialect: the fingerprint moved without any fleet change, so it is not reading file metadata"
+
+    # And it must still be a real gate: a state event has to move it. This is
+    # what stops the test passing vacuously when a dialect yields no metadata.
+    printf 'done: one finished\n' >> "$home/state/one.status"
+    c=$(PATH="$fb:$PATH" FM_FAKE_STAT_LOG="$home/stat.log" FM_HOME="$home" "$BOARD" fingerprint)
+    [ "$b" != "$c" ] \
+      || fail "$dialect: a real state event did not move the fingerprint, so no metadata was read"
+  done
+  pass "the fingerprint reads file metadata, not filesystem reports, under either stat dialect"
+}
+
+# The lock age is arithmetic, so a stat dialect that prints prose instead of a
+# number must not be able to abort the rebuild. That failure exits 0 under the
+# watcher, which discards stderr, so the board would stop rebuilding in silence.
+test_the_stale_lock_reclaim_survives_either_stat_dialect() {
+  local home dialect fb out
+  for dialect in bsd gnu; do
+    home=$(make_home "stat-lock-$dialect")
+    write_mixed_backlog "$home"
+    fb=$(make_stat_shim "$home" "$dialect")
+    : > "$home/stat.log"
+    mkdir -p "$home/state/.fleet-board.lock"
+
+    out=$(PATH="$fb:$PATH" FM_FAKE_STAT_LOG="$home/stat.log" FM_BOARD_LOCK_STALE=0 \
+      FM_HOME="$home" "$BOARD" refresh --out "$home/board.html" 2>&1) \
+      || fail "$dialect: refresh failed outright: $out"
+    case "$out" in
+      *rebuilt*) : ;;
+      *) fail "$dialect: a stale lock was never reclaimed: $out" ;;
+    esac
+    [ -f "$home/board.html" ] || fail "$dialect: the reclaimed rebuild produced no board"
+    [ -s "$home/stat.log" ] \
+      || fail "$dialect: the $dialect stat shim was never invoked, so this proves nothing"
+  done
+  pass "the stale-lock reclaim reads a real mtime under either stat dialect"
+}
+
 test_board_never_asserts_how_it_was_opened() {
   local home html
   home=$(make_home offline-copy)
@@ -1073,6 +1208,8 @@ test_a_stale_rebuild_lock_is_reclaimed
 test_fingerprint_moves_only_with_real_state_change
 test_fingerprint_follows_secondmate_state_too
 test_fingerprint_reads_the_registry_the_way_its_owner_does
+test_fingerprint_is_identical_under_either_stat_dialect
+test_the_stale_lock_reclaim_survives_either_stat_dialect
 test_board_never_asserts_how_it_was_opened
 test_secondmate_captain_holds_reach_the_board
 test_snapshot_exposes_captain_threads_for_every_secondmate_hold
