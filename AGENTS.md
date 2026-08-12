@@ -69,6 +69,8 @@ config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignore
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; inherited by secondmate homes under the primary-authoritative contract in secondmate-provisioning
+config/update-remote  git remote name every home fast-forwards its own tracked files from; LOCAL, gitignored; absent = "origin"; inherited by secondmate homes; see docs/configuration.md "Self-update source and upstream contributions"
+config/upstream-remote  git remote name of the upstream open-source project this fork contributes back to; LOCAL, gitignored, no default, and NOT inherited; see the same section
 config/calm     Pi Calm presentation preference; LOCAL, gitignored, and not inherited; see docs/configuration.md "Pi Calm preference"
 config/latent-workers  optional `off` opt-out from automatic finished-PR worker hibernation; absent or `on` enables it; LOCAL, gitignored, and not inherited; see docs/configuration.md "Latent finished workers"
 config/startup-memory-budget     primary-authoritative per-home startup-memory budget; LOCAL, gitignored, materialized as 7,500 estimated tokens by locked primary bootstrap and inherited into secondmate homes; see docs/configuration.md "Startup memory budget"
@@ -503,10 +505,18 @@ Load `secondmate-provisioning` before creating or using a charter brief and pres
 Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.
 The scaffold is a safety contract, not a suggestion.
 
-## 12. Self-update
+## 12. Self-update and upstream contribution
 
-Firstmate's shared instruction surface reaches running homes only after it lands on the default branch and those homes fast-forward.
+Firstmate's shared instruction surface reaches running homes only after it lands on this home's update source and those homes fast-forward.
+That source is the fleet's own, which may be a fork of the open-source project rather than the project itself; `docs/configuration.md` owns which remotes name it.
+Landing firstmate work on that source is what completes the task, so a firstmate change is usable as soon as it lands and never waits on anyone outside this fleet.
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
+
+Contributing back to the upstream project is good citizenship, not tracked work.
+Open the pull request, tell the captain it exists, and never wait on it: it takes no backlog item, no development slot, and no monitoring, and firstmate's shared poll-arming primitive refuses it on every path that could arm one.
+Pulling the upstream project's work back in is the separate deliberate step owned by `bin/fm-absorb-upstream.sh`, run when the captain asks rather than on a schedule.
+It is fast-forward-only, never writes to the upstream remote, and reports genuine divergence for a human decision instead of reconciling it.
+
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs guarded fast-forward updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
 

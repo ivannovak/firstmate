@@ -24,6 +24,37 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Self-update source and upstream contributions (config/update-remote / config/upstream-remote)
+
+Firstmate is a shared template, and a home may run from its own fork of it rather than from the open-source project.
+Two local, gitignored files under the effective home's `config/` name the git remotes involved, and both hold a remote NAME rather than a URL, so the address stays in git's own remote configuration where `git remote -v` can show it and no captain's fork address is ever written into tracked material.
+
+`config/update-remote` names the remote every home in this fleet fast-forwards its own tracked files from.
+Absent means `origin`, which is exactly what a home with no configuration has always used, so an unconfigured install is unchanged.
+`bin/fm-update.sh` reports the resolved remote as its `update-source:` line and refuses the whole run rather than falling back when the configured name is unusable, because silently reverting to `origin` would move an entire fleet to a source nobody chose.
+A file that exists but cannot be read as an ordinary file - a symlink, or a permissions accident - keeps the `origin` default so an unconfigured or reconciled home stays smooth, but the resolver warns on stderr naming the file and the remote it used instead, so that fallback is never silent either.
+The primary home propagates this file to every secondmate home as inherited local material (`bin/fm-config-inherit-lib.sh`), so the fleet self-updates from one source; a remote route carries the same resolved choice into that host's shared code root, which has no home configuration of its own.
+A target whose checkout has no such remote is skipped and reported by name, exactly like any other target that cannot cleanly fast-forward.
+
+`config/upstream-remote` names the upstream open-source project this fork contributes back to.
+It has no default: a home that names none has no upstream, and every upstream-specific behavior below stays inert.
+A file that exists but cannot be read as an ordinary file is treated exactly like an absent one, so those behaviors go inert rather than guessing, and the resolver says so on stderr instead of letting that happen silently.
+It is deliberately not inherited by secondmate homes, because only the home that ships firstmate's tracked material has an upstream to name.
+
+Setting the two depends on how the home's remotes are already arranged, and both arrangements work:
+
+- `origin` already points at the fork, with a second remote for the open-source project: leave `update-remote` absent and set `upstream-remote` to that second remote's name.
+  This is the arrangement to prefer for a home that runs its own fork, because the update source needs no configuration at all and the pull request a gate opens against `origin` lands on the fork, where its own captain holds merge authority.
+  It is deliberately the mirror image of the contributor arrangement in [`CONTRIBUTING.md`](../CONTRIBUTING.md), which points `origin` at the open-source project precisely so a contribution's pull request opens there; the two are different jobs, not a disagreement.
+- `origin` points at the open-source project, with a second remote for the fork: set `update-remote` to the fork's remote name and `upstream-remote` to `origin`.
+  A home arranged for contributing that also wants to run from its fork uses this one, and its gate keeps opening pull requests at the open-source project, which `bin/fm-pr-check.sh` then refuses to wait on.
+
+Two behaviors follow from a configured upstream.
+`bin/fm-absorb-upstream.sh` is the separate, deliberate path that pulls the upstream project's work into the fork; it is fast-forward-only, never writes to the upstream remote, and reports genuine divergence with its ahead/behind counts instead of reconciling it.
+No poll is armed for a pull request at that upstream, because nobody in this fleet can merge it and waiting on it would only produce recurring wakes; a pull request anywhere else is unaffected.
+That refusal lives in the shared arming primitive in `bin/fm-pr-lib.sh` that every armed poll passes through, so `bin/fm-pr-check.sh` and the rebuild paths in `bin/fm-pr-check-migrate.sh` are all covered; the migration reports such a task as `upstream contribution poll quarantined and left unarmed` rather than as a repair it failed to make.
+It acts only on a positive repository-identity match (host plus project path, case-insensitive), never on the provider and never on an upstream it cannot resolve, because suppressing more than that one repository would silently stop merge wakes the fleet depends on.
+`AGENTS.md` section 12 owns the operating model those two behaviors serve.
 ## Latent finished workers (config/latent-workers)
 
 An absent `config/latent-workers` file or the exact value `on` enables automatic eligibility attempts when a finished worker reports its PR-ready result.
@@ -195,7 +226,7 @@ Each seed writes an `.fm-secondmate-home` identity marker at the home root, alon
 The tracked root `.gitignore` ignores both markers, so validation can read them without making a freshly seeded home appear dirty to porcelain-based safety checks.
 This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
-A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
+A standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s update-source refresh instead.
 
 ## FM_HOME
 
@@ -329,7 +360,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, `update-remote`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.

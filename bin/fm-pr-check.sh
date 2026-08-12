@@ -7,6 +7,8 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# A pull request at this home's configured upstream contribution target is
+# refused rather than armed; see the check below for why.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -14,9 +16,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-update-source-lib.sh
+. "$SCRIPT_DIR/fm-update-source-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -57,6 +62,33 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
 fi
+
+# A pull request opened AT the upstream open-source project this home
+# contributes to is fire-and-forget: this fleet has no merge authority there,
+# nothing downstream waits on it, and arming a poll would only produce recurring
+# wakes for a decision someone else makes on their own schedule. Refuse it at
+# the front door, where there is a person to tell which pull request should have
+# been recorded instead; bin/fm-pr-lib.sh's arming primitive enforces the same
+# rule for every other path that could arm one.
+# A home with no upstream configured never reaches this check at all, so the
+# default behavior is unchanged.
+# An unusable configured NAME is a refusal here rather than a lost check,
+# because this is an operator typing a command with a person to answer. The
+# match itself acts only on a POSITIVE identity match: a configured remote that
+# cannot be resolved to a forge identity - a missing remote, a local-path URL -
+# warns and continues rather than blocking every unrelated project's merge poll
+# on this home's own contribution setting.
+fm_upstream_contribution_remote_var "$CONFIG" || {
+  echo "error: $FM_UPDATE_SOURCE_ERROR" >&2
+  exit 1
+}
+if fm_upstream_contribution_pr_match "$CONFIG" "$FM_ROOT" "$HOST" "$PROJECT_PATH"; then
+  echo "error: $URL is a contribution to the upstream project ($FM_UPSTREAM_CONTRIBUTION_REMOTE); upstream pull requests are not waited on" >&2
+  echo "record the pull request on this fleet's own update source instead" >&2
+  exit 1
+fi
+[ -z "$FM_UPSTREAM_CONTRIBUTION_WARNING" ] \
+  || echo "warning: $FM_UPSTREAM_CONTRIBUTION_WARNING" >&2
 
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
