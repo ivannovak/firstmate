@@ -253,9 +253,12 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
 }
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
-  stripped=${line//[[:space:]]/}
-  [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
+  local open=$1 line=$2 resolve=$3 held=$4 verb key note
+  # Blank-line fast path. Keep it a case glob - the equivalent
+  # `${line//[[:space:]]/}` costs ~1.8s for a single 3KB status line on stock
+  # macOS bash 3.2, which alone made this fold the fleet snapshot's dominant
+  # cost (docs/verification/fleet-snapshot-performance.md).
+  case "$line" in *[![:space:]]*) ;; *) printf '%s' "$open"; return 0 ;; esac
   verb=$(status_line_verb "$line")
   key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
   _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
@@ -532,13 +535,14 @@ EOF
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
 _fm_status_open_activities_stream() {
-  local line verb key note resolve held open='' stripped pause
+  local line verb key note resolve held open='' pause
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
-    stripped=${line//[[:space:]]/}
-    [ -n "$stripped" ] || continue
+    # Blank-line fast path: see _fm_decision_fold_line for why this stays a
+    # case glob rather than `${line//[[:space:]]/}`.
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in
