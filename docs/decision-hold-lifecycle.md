@@ -31,18 +31,32 @@ A failed intermediate step leaves the hold open.
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
-It resolves every repeated `blocked-by:` edge against structured Done records, keeps missing blockers unresolved, and classifies only an unblocked captain hold as actionable.
-Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves blocked captain holds as queued work in the owning home.
+It resolves every repeated `blocked-by:` edge against structured Done records and keeps missing blockers unresolved.
+Its `captain_held` predicate turns on the hold rather than the item's shape, so any live row carrying a captain hold qualifies whatever its state or kind, because most decisions arise mid-task rather than as a queued decision record.
+`captain_actionable` narrows that set to the rows with no unresolved blocker and keeps its documented "actionable" meaning.
+Its secondmate-home summary carries the whole live set as `captain_threads`, each row flagged actionable or blocked with what blocks it, and classifies a home with an actionable captain hold as `captain_decision`.
+`captain_threads` survives the drop to the untrusted parent-event fallback whenever the home's own summary was readable, with its untruncated count and drop disclosure, because a captain hold is a backlog fact that does not depend on reconciling live child metadata.
+A reader that must not undercount what awaits the captain therefore reads `captain_threads` rather than reassembling it from the other surfaces, and the script header owns the exact field semantics and bounds.
 
-`bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open` and leaves blocked captain holds in ordinary queued gates.
+`bin/fm-bearings-snapshot.sh` projects actionable captain holds into `decisions_open` and blocked ones into gates.
+For this home it reads the backlog directly, so a blocked hold whose own worker is still running appears only in the `in_flight` projection, where the held row is individually visible anyway.
+For a registered secondmate it reads that home's `captain_threads`, so a hold still lands when the record dropped to the untrusted parent-event fallback and `decisions_open` came back empty; every blocked mate hold reaches gates, because a mate's held row is never an `in_flight` row of its own and would otherwise appear nowhere.
+Both sections dedupe by id, since a readable home describes the same hold on two surfaces at once and a double count is no more trustworthy than an undercount.
 It excludes completed kind `captain` records from Recently Landed.
 The projection remains read-only and does not inspect historical prose.
+
+Bearings and the captain fleet board read the same live captain-owned set and then partition it differently on purpose, so their headline numbers are not meant to match.
+Bearings splits it, actionable into Captain's Call and blocked into gates; the board keeps both in its needs-you column and marks the blocked ones unanswerable.
+They also diverge under the snapshot's per-home bound on `captain_threads`: the board folds the holds it could not list into its headline needs-you total, while Bearings leaves its sections at what fitted and discloses the drop in `omitted`.
+Neither is undercounting silently, which is the only property both surfaces owe the captain.
+Each script's header owns its own column contract.
 
 ## Verification record
 
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Unreconcilable-home captain-thread projection verification date: 2026-08-08.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -88,4 +102,21 @@ $ git diff --check
 
 $ for test_script in tests/*.test.sh; do bash "$test_script"; done
 ALL 71 TEST SCRIPTS PASSED
+```
+
+The 2026-08-08 entry covers only the secondmate side of the Captain's Call partition.
+All three fixtures were watched failing first: the troubled-home case reported an empty `decisions_open` and an empty `gates` against a snapshot already reporting one `captain_threads` row, the readable-home control was re-run with the id dedupe replaced by an identity so a genuine double count was observed being caught on both sections, and the capped-home case reported two decisions with no drop marker at all against a snapshot already reporting three of five holds omitted.
+The cap fixture was then proven non-vacuous from both directions: dropping the "only when something was dropped" guard made the uncapped control fail on a spurious marker, and reporting the bounded array length as the total made the capped case fail on `3 of 2`.
+
+```text
+$ bash tests/fm-bearings-snapshot.test.sh
+ok - a captain hold inside a troubled mate home still reaches Captain's Call
+ok - a readable mate captain hold is counted exactly once in Captain's Call
+ok - a mate home's snapshot-capped captain holds are disclosed in bearings omitted[]
+
+$ bin/fm-lint.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=65 local_links=217
 ```

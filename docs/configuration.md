@@ -72,6 +72,21 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Captain fleet board (config/fleet-board)
+
+The captain-facing fleet board is off until this home opts in by creating the local, gitignored `config/fleet-board` file; its contents are ignored and only its presence matters.
+While it is present, the watcher's poll loop asks [`bin/fm-fleet-board.sh`](../bin/fm-fleet-board.sh) to refresh the board on every cycle, and that script decides whether a rebuild is actually owed by fingerprinting the authoritative inputs rather than by elapsed time.
+An unchanged fleet costs one hash per backlog file plus a single batched `stat` per local home, so the gate stays in the milliseconds the poll loop can afford however many tasks the fleet is carrying; a changed one hands the expensive rebuild to a detached single-flight child so supervision never waits on it.
+Change detection covers local homes only and makes no network call, because the watcher runs it inline on every cycle.
+A second mate whose home is on another machine still appears on the board, but a change made only inside its own backlog does not by itself trigger a rebuild, though a parent event landing in this home's status log still does.
+Every registered mate home is local today, so this is a disclosed limit on a future arrangement rather than a live gap, and the rendered board says the same thing in its own footer.
+Nothing about the board can affect supervision: the watcher discards its result, because a read surface must not be able to stop the watcher.
+The board itself is written to `state/fleet-board.html`, alongside the `state/.fleet-board.*` fingerprint, model, and rebuild-lock records; every one of them is derived and safe to delete.
+Publishing is a separate explicit step rather than part of the opt-in: `bin/fm-fleet-board.sh serve` stages the rendered board alone in `state/.fleet-board-web/`, serves that directory from a loopback-bound local server recorded in `state/.fleet-board.server.pid`, and points Tailscale at that loopback address.
+`bin/fm-fleet-board.sh status` reports the board's age, whether its inputs have moved, and the current serve configuration, while `unserve` withdraws the published board and stops that local server.
+Creating `config/fleet-board` only keeps the board rebuilt; on its own it publishes nothing.
+That script's header is the single owner of the column contract, the age derivation, the staleness presentation, and the tailnet-only publishing rules.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.

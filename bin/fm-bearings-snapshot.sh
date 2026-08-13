@@ -23,6 +23,26 @@
 # backlog roles, unresolved blockers, and captain actionability. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
 #
+# Captain's Call partition, for a registered secondmate as for this home: an
+# ACTIONABLE captain hold is a decisions_open row and a BLOCKED one is a gates row
+# naming what blocks it. The secondmate side of both is built from that home's
+# canonical captain_threads, which is its complete live captain-owned set, rather
+# than from decisions_open alone: decisions_open empties when the record drops to
+# the untrusted parent-event fallback, and reading it alone therefore let a home
+# whose current state could not be reconciled contribute a silent zero to the one
+# count that must never undercount. captain_threads survives that drop. Each
+# section unions captain_threads onto the surface it already read - decisions_open
+# for the first, queued for the second - and dedupes by id, keeping the earlier
+# richer row, because a readable home describes the same hold on both surfaces at
+# once and a double count is no more honest than an undercount. A blocked mate hold
+# always reaches gates, unlike this home's, whose held row is an in_flight row of
+# its own; a mate's is not, so suppressing it would hide it everywhere.
+# Status-sourced decisions stay excluded here; the canonical snapshot keeps them.
+# captain_threads is itself bounded per home by FM_SNAPSHOT_SECONDMATE_DECISIONS, so
+# omitted[] carries the drop each home discloses against the untruncated total it
+# reports. Reading a capped surface is acceptable; reading it silently is not, which
+# is the whole reason these sections stopped reading decisions_open.
+#
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
 # Bearings never invents Underway rows from backlog-only ids; it discloses those
@@ -314,6 +334,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | $groups[]
        | select(length > $i)
        | .[$i]][:$n];
+  # First-occurrence-wins dedupe that PRESERVES input order, unlike unique_by,
+  # which sorts. A captain hold in a readable home is described by two snapshot
+  # surfaces at once, so the richer earlier row has to win without the section
+  # silently reordering itself.
+  def dedupe_by_id:
+    reduce .[] as $row ([]; if any(.[]; .id == $row.id) then . else . + [$row] end);
   ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
@@ -390,10 +416,17 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.structured and .captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",
             summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
-     + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
-         | select(.source == "backlog" and .verb == "captain-hold")
-         | {id:($m.id + "/" + .id),key,verb,
-            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
+     + [ (.secondmate_current.records // [])[] as $m
+         | ([ $m.decisions_open[]?
+              | select(.source == "backlog" and .verb == "captain-hold")
+              | {id,key,verb,
+                 summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90))} ]
+            + [ $m.captain_threads[]?
+                | select(.actionable == true)
+                | {id,key:.id,verb:"captain-hold",
+                   summary:(((.title // .id) + ": " + (.reason // "captain decision pending")) | trunc(90))} ]
+            | dedupe_by_id)[]
+         | {id:($m.id + "/" + .id),key,verb,summary,owner:$m.id} ]) as $decisions_all
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
@@ -413,12 +446,20 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
             reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
-         | select($m.provenance.selected == "structured-home")
-         | $m.queued[]?
-         | select(.captain_actionable != true)
-         | {id,title:(.title | trunc(60)),
-            blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
-            reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:$m.id} ]) as $gates_all
+         | ([ if $m.provenance.selected == "structured-home" then
+                $m.queued[]?
+                | select(.captain_actionable != true)
+                | {id,title:(.title | trunc(60)),
+                   blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
+                   reason:((.hold_reason // .blocked_reason // "-") | trunc(40))}
+              else empty end ]
+            + [ $m.captain_threads[]?
+                | select(.actionable != true)
+                | {id,title:(.title | trunc(60)),
+                   blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
+                   reason:((.reason // "-") | trunc(40))} ]
+            | dedupe_by_id)[]
+         | . + {owner:$m.id} ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
@@ -465,6 +506,19 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
         (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),
         (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
+        # The two sections above read captain_threads, which the snapshot bounds per
+        # home. Take the drop from the disclosure each home itself emits rather than
+        # recomputing it here, so the two layers can never disagree, and name the
+        # untruncated total beside it: those sections show only what fitted, and a
+        # captain hold that fell off the end must not vanish without a marker.
+        (([ ($snap.secondmate_current.records // [])[]
+            | {dropped:([ (.omitted // [])[] | select(.surface == "captain_threads") | .count ] | add // 0),
+               total:(.counts.captain_threads // 0)}
+            | select(.dropped > 0) ]) as $capped
+         | if ($capped | length) > 0 then
+             {surface:("secondmate captain holds omitted by snapshot per-home bound: \([$capped[].dropped] | add) of \([$capped[].total] | add) across \($capped | length) home(s)"),
+              reveal:"raise FM_SNAPSHOT_SECONDMATE_DECISIONS"}
+           else empty end),
         (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
         (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
         (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),

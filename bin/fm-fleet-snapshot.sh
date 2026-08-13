@@ -17,9 +17,14 @@
 #     those sections are preserved as unstructured records.
 #     Structured rows preserve captain-hold metadata such as hold_kind and
 #     hold_reason when tasks-axi emits it. They also carry normalized current_role,
-#     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
-#     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
+#     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, captain_held,
+#     and captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
+#     captain_held is every live captain-owned thread: any non-Done row carrying a
+#     captain hold, whatever its state or kind. captain_actionable narrows that to
+#     the ones with no unresolved blocker, so the captain can act now. Neither
+#     depends on the row's task SHAPE: a captain hold on in-flight work, or on an
+#     ordinary chore, is exactly as captain-owned as a dedicated decision record.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
@@ -33,20 +38,43 @@
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
-#   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
+#   main_inventory: {valid,reason,orphan_in_flight[],terminal_in_flight[],
+#     unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
 #     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
 #     current backlog rows). Does not invent live tasks; meta remains truth for
 #     workers. Bearings maps failures into omitted[] disclosure (and a Charted
 #     Next gate line) rather than silent empty Underway.
+#     terminal_in_flight[] carries {id,state} for every structured in-flight row
+#     whose child has already reached done or failed, the same condition
+#     secondmate_home_summary_json models under that name. It is a DISCLOSURE
+#     only and deliberately does not move valid/reason: those two are a pinned
+#     contract Bearings already gates on, while a renderer needs the terminal
+#     rows themselves so it can say what actually happened to that work instead
+#     of falling through to a "queued for dispatch" default that is false.
 #   secondmate_current: {records[],total,shown,truncated} - bounded current summaries
 #     for registered secondmates, selected from validated structured state inside
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
-#     Each structured-home record carries active_children, decisions_open, holds,
-#     queued, landed, endpoints, counts, and omitted. Actionable captain holds
-#     appear in decisions_open; blocked captain holds remain queued with metadata.
+#     Each structured-home record carries active_children, decisions_open,
+#     captain_threads, holds, queued, landed, endpoints, counts, and omitted.
+#     Actionable captain holds appear in decisions_open; blocked captain holds
+#     remain queued with metadata. captain_threads is the complete live
+#     captain-owned set for that home, actionable and blocked alike, each row
+#     carrying its own actionable flag - so a reader that must not undercount what
+#     awaits the captain reads captain_threads rather than reassembling it.
+#     captain_threads survives the drop to the untrusted parent-event fallback
+#     whenever the home's own summary was readable, because a captain hold is a
+#     backlog fact that does not depend on reconciling live child metadata.
+#     Suppressing it would hide captain decisions inside precisely the homes whose
+#     current state is already in doubt; every other surface still empties.
+#     Like every other list here the ARRAY is bounded, by
+#     FM_SNAPSHOT_SECONDMATE_DECISIONS. counts.captain_threads is the home's true
+#     untruncated total and omitted[] carries the {surface:"captain_threads"}
+#     drop, in the fallback branch exactly as in the structured one, so a reader
+#     never mistakes the bounded array's length for the size of the captain's
+#     queue.
 #   secondmate_landed: {records[],truncated[],unreadable[],partial[]} - the
 #     compatibility landed-work roll-up derived from secondmate_current. Readable
 #     structured homes with an unknown current classification are partial, not
@@ -392,9 +420,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
                elif .state == "queued" then "queued"
                else "done" end)
           | .requires_child_metadata = (.current_role == "worker")
+          | .captain_held =
+              (.state != "done" and .hold_kind == "captain" and .hold_reason != null)
           | .captain_actionable =
-              (.state == "queued" and .kind == "captain" and .hold_kind == "captain"
-               and .hold_reason != null and (.unresolved_blocker_ids | length) == 0)
+              (.captain_held and (.unresolved_blocker_ids | length) == 0)
         else . end)
     | del(.section,.order)
   ' < "$backlog"
@@ -631,11 +660,15 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
     --argjson tasks "$2" '
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
-    | ([ $backlog.records[]?
-         | select(.state == "in_flight" and .structured and .requires_child_metadata) ]) as $owned_in_flight
+    | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $in_flight_structured
+    | ([ $in_flight_structured[] | select(.requires_child_metadata) ]) as $owned_in_flight
     | ([ $owned_in_flight[]
          | select(.id as $id | [$tasks[].id] | index($id) | not)
          | .id ]) as $orphan_in_flight
+    | ([ $in_flight_structured[] as $work
+         | $tasks[]
+         | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
+         | {id,state:.current_state.state} ]) as $terminal_in_flight
     | (($unstructured_current | length) == 0
        and ($orphan_in_flight | length) == 0) as $valid
     | (if ($unstructured_current | length) > 0 then "unstructured current backlog row"
@@ -645,6 +678,7 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
         valid:$valid,
         reason:$reason,
         orphan_in_flight:$orphan_in_flight,
+        terminal_in_flight:$terminal_in_flight,
         unstructured_current_count:($unstructured_current | length)
       }'
 }
@@ -675,10 +709,19 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
               (.state == "in_flight" and .current_role == "held"
                and (.id as $id
                     | any($tasks[]; .id == $id and .current_state.state == "working") | not)))) ]) as $queued_all
-    | ([ $queued_all[]
+    | ([ $backlog.records[]? | select(.structured and .captain_held == true) ]) as $captain_held_all
+    | ([ $captain_held_all[]
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
             reason:(.hold_reason | trunc(160)),source:"backlog"} ]) as $captain_holds_all
+    | ([ $captain_held_all[]
+         | {id:(.id | trunc(120)),title:(.title | trunc(120)),
+            reason:((.hold_reason // "captain decision pending") | trunc(160)),
+            state:.state,kind:((.kind // null) | if . == null then null else trunc(40) end),
+            repo:((.repo // null) | if . == null then null else trunc(120) end),
+            since:(.since // null),
+            actionable:(.captain_actionable == true),
+            unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120)))} ]) as $captain_threads_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
@@ -767,6 +810,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         state:$state,
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
+        captain_threads:$captain_threads_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
@@ -775,6 +819,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
+          captain_held:(.captain_held // false),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
@@ -784,6 +829,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         counts:{
           active_children:($active_all | length),
           decisions_open:($decisions_all | length),
+          captain_threads:($captain_threads_all | length),
           holds:($holds_all | length),
           queued:($queued_all | length),
           landed:($landed_all | length),
@@ -792,6 +838,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
         omitted:[
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
+          (if ($captain_threads_all | length) > $decisions_n then {surface:"captain_threads",count:(($captain_threads_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
           (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
@@ -1180,6 +1227,9 @@ secondmate_current_json() {  # <parent-tasks-json>
     reason=$registry_error
     summary='{}'
     summary_valid=false
+    readable_captain_threads='[]'
+    readable_captain_threads_total=0
+    readable_captain_omitted='[]'
     if [ -z "$reason" ] && [ -z "$home" ]; then reason="no recorded secondmate home"; fi
     if [ -z "$reason" ]; then
       case "$home" in
@@ -1245,6 +1295,23 @@ secondmate_current_json() {  # <parent-tasks-json>
           reason="structured home snapshot was malformed or stale"
         else
           summary_valid=$(printf '%s' "$summary" | jq -r '.valid')
+          # The summary parsed and matched the schema, so this home's structured
+          # backlog WAS readable whatever its current-state classification turns
+          # out to be. Captain holds are backlog facts and do not depend on
+          # reconciling live child metadata, so keep them even when the
+          # classification below sends this record to the untrusted fallback.
+          # Losing them there would hide captain decisions inside exactly the
+          # homes that are already in trouble.
+          # The array is bounded by FM_SNAPSHOT_SECONDMATE_DECISIONS, so the
+          # untruncated total and the home's own drop disclosure travel with it:
+          # a reader that must not undercount the captain's queue needs both, and
+          # this branch would otherwise report the bounded length as if it were
+          # the whole set, unlike the structured branch beside it.
+          readable_captain_threads=$(printf '%s' "$summary" | jq -c '.captain_threads // []')
+          readable_captain_threads_total=$(printf '%s' "$summary" \
+            | jq -r '.counts.captain_threads // ((.captain_threads // []) | length)')
+          readable_captain_omitted=$(printf '%s' "$summary" \
+            | jq -c '[ (.omitted // [])[] | select(.surface == "captain_threads") ]')
           if [ "$summary_valid" != true ]; then
             summary_reason=$(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')
             summary_invalidity=$(printf '%s' "$summary" | jq -r '.invalidity.kind // "unknown"')
@@ -1285,7 +1352,8 @@ secondmate_current_json() {  # <parent-tasks-json>
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:"fresh",observed_at:$observed,age_seconds:0},
          active_children:$summary.active_children,
-         decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
+         decisions_open:$summary.decisions_open,captain_threads:($summary.captain_threads // []),
+         holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}')
@@ -1307,12 +1375,15 @@ secondmate_current_json() {  # <parent-tasks-json>
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
         --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
-        --argjson decisions "$decisions" --argjson terminal "$terminal" '
+        --argjson decisions "$decisions" --argjson terminal "$terminal" \
+        --argjson captain_threads "$readable_captain_threads" \
+        --argjson captain_threads_total "$readable_captain_threads_total" \
+        --argjson captain_omitted "$readable_captain_omitted" '
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:"unknown",reason:$reason},invalidity:null,
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
-         active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
+         active_children:[],decisions_open:[],captain_threads:$captain_threads,holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,captain_threads:$captain_threads_total,holds:0,queued:0,landed:0,endpoints:0},omitted:$captain_omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
     fi

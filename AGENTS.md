@@ -72,6 +72,7 @@ config/backend  runtime session-provider backend override for new tasks; LOCAL, 
 config/update-remote  git remote name every home fast-forwards its own tracked files from; LOCAL, gitignored; absent = "origin"; inherited by secondmate homes; see docs/configuration.md "Self-update source and upstream contributions"
 config/upstream-remote  git remote name of the upstream open-source project this fork contributes back to; LOCAL, gitignored, no default, and NOT inherited; see the same section
 config/calm     Pi Calm presentation preference; LOCAL, gitignored, and not inherited; see docs/configuration.md "Pi Calm preference"
+config/fleet-board  optional presence flag enabling the default-off captain fleet board, rebuilt by the watcher on real state change and published tailnet-only; LOCAL, gitignored; not inherited; see docs/configuration.md "Captain fleet board" and bin/fm-fleet-board.sh
 config/latent-workers  optional `off` opt-out from automatic finished-PR worker hibernation; absent or `on` enables it; LOCAL, gitignored, and not inherited; see docs/configuration.md "Latent finished workers"
 config/startup-memory-budget     primary-authoritative per-home startup-memory budget; LOCAL, gitignored, materialized as 7,500 estimated tokens by locked primary bootstrap and inherited into secondmate homes; see docs/configuration.md "Startup memory budget"
 config/herdr-presentation-spaces  optional "off" opt-out from, or "on" opt-in to, Herdr's default-on disposable single-task visual projection, which is unconfigured-default-on only at or above a Herdr version floor; LOCAL, gitignored; inherited by secondmate homes; see docs/herdr-backend.md "Presentation spaces"
@@ -115,6 +116,7 @@ state/               volatile runtime signals; gitignored
   x-outbox/          generated Relay dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
   public-followup/   generated private transport for promised public replies: commitment registrations, typed terminal-result inbox, accepted/rejected ledgers (section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated Relay and offer-claim diagnostic dedupe markers
+  fleet-board.html .fleet-board.* .fleet-board-web/  generated captain fleet board plus its input fingerprint, rendered model, and single-flight rebuild lock, all derived from the canonical snapshot and safe to delete; while the board is published, .fleet-board-web/ holds the served copy and .fleet-board.server.pid its loopback server, withdrawn with fm-fleet-board.sh unserve; bin/fm-fleet-board.sh
   .startup-network.*  status, report, per-step elapsed timings, inline-print claim, and lock for the deferred network stage session start runs off its blocking path; bin/fm-startup-network.sh
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .<id>.pr-activity-cursor  per-task cursor suppressing an unchanged repeat of the PR poll's review-activity line; written only by fm-pr-lib.sh, removed by teardown, safe to delete (forces one repeat wake)
