@@ -304,7 +304,14 @@ EOF
     || fail "grok spawn answered the trust dialog instead of refusing it"
   assert_not_contains "$out" "spawned $id" \
     "grok trust refusal still reported a successful worker"
-  pass "fm-spawn: Grok detects an active trust frame above the visible slice and refuses its grant"
+  assert_contains "$out" "the unconfirmed endpoint will be closed" \
+    "grok trust refusal did not state what happens to the endpoint it refused"
+  # The refusal runs after the task record is published, so nothing else owns
+  # this endpoint: an unclosed pane leaves Grok parked on the dialog outside
+  # task control, and the message above would be a promise the spawn never kept.
+  assert_grep "kill-window -t =firstmate:=fm-$id" "$case_dir/tmux-calls.log" \
+    "grok trust refusal left the unconfirmed endpoint running"
+  pass "fm-spawn: Grok detects an active trust frame above the visible slice, refuses its grant, and closes the endpoint"
 }
 
 test_grok_trust_dialog_after_adopted_scrollback_fails() {
@@ -413,6 +420,8 @@ EOF
     "historical Grok trust text was classified as active"
   [ ! -s "$case_dir/grok-trust-answer.log" ] \
     || fail "grok spawn answered historical trust text"
+  assert_no_grep "kill-window" "$case_dir/tmux-calls.log" \
+    "a confirmed grok dispatch closed the endpoint its worker was launched into"
   pass "fm-spawn: Grok ignores historical trust text followed by the current session surface"
 }
 

@@ -344,7 +344,9 @@
 # a previous session's surface as this one's.
 # Firstmate never answers the dialog because doing so grants project content and
 # hooks additional execution authority; a positively active frame fails and
-# rolls back the spawn instead of reporting a worker that never read its brief.
+# rolls back the spawn instead of reporting a worker that never read its brief,
+# and closes the endpoint so the pane parked on the unanswered dialog does not
+# outlive the spawn that refused it.
 # Grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -3686,9 +3688,15 @@ grok_active_trust_dialog_detected() {
   return 1
 }
 
+# Refusing the trust grant is only half the refusal: the pane is still parked on
+# an unanswered dialog, and this gate runs past the point where the abort trap
+# owns the endpoint, so the launched Grok must be closed here (see
+# launch_gate_endpoint_cleanup) or it survives as an untrusted process outside
+# task control while the status record says the spawn failed.
 grok_spawn_fail() { # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; the unconfirmed endpoint will be closed" >&2
+  launch_gate_endpoint_cleanup
 }
 
 kimi_capture() {
@@ -3909,7 +3917,7 @@ rovo_wait_for_delivery() {
 rovo_spawn_fail() { # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  launch_gate_endpoint_cleanup
 }
 
 # The launch-then-confirm gates run after the task record is published, when
@@ -3919,7 +3927,10 @@ rovo_spawn_fail() { # <detail>
 # task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
 # the exact terminal is closed: that stops the CLI while its worktree stays
 # for the record's own teardown, which owns worktree deletion.
-rovo_endpoint_cleanup() {
+# Named for the gate rather than for a harness because rovo's readiness and
+# delivery gates, agy's working gate, and grok's trust refusal all route their
+# post-launch failures here.
+launch_gate_endpoint_cleanup() {
   if [ "$BACKEND" = orca ]; then
     fm_backend_kill orca "$T" 2>/dev/null || true
     return 0
@@ -3982,7 +3993,7 @@ agy_wait_for_working() {
 agy_spawn_fail() {  # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  launch_gate_endpoint_cleanup
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
