@@ -8,6 +8,87 @@ set -u
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-grok-harness)
 
+install_grok_tmux_fake() { # <fakebin>
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
+state=$(cat "$FM_FAKE_GROK_STATE" 2>/dev/null || true)
+render_dialog() {
+  printf 'Do you trust the contents of this directory?\n%s\n                         Yes, proceed                 y\n                         No, quit                     n\n\nGrok Build  1.0.40 [stable]\n' "$FM_FAKE_PANE_PATH"
+}
+render_ready() {
+  printf 'Tip: Use @ to attach files.\n╭────────────────────────────────╮\n│ ❯                              │\n╰── Weekly limit left: 50%% ──────╯\nShift+Tab:mode  │  Ctrl+x:shortcuts\nGrok Build  1.0.40 [stable]\n'
+}
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|set-window-option|kill-window) exit 0 ;;
+  send-keys)
+    prev=
+    literal=
+    for arg in "$@"; do
+      if [ "$prev" = -l ]; then literal=$arg; break; fi
+      prev=$arg
+    done
+    if [ -n "$literal" ]; then
+      case "$literal" in
+        ". '"*"'")
+          staged=${literal#". '"}
+          staged=${staged%"'"}
+          [ ! -f "$staged" ] || literal=$(cat "$staged")
+          printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          printf 'launched\n' > "$FM_FAKE_GROK_STATE"
+          ;;
+        y)
+          printf 'y\n' >> "$FM_FAKE_GROK_TRUST_ANSWER_LOG"
+          printf 'history\n' > "$FM_FAKE_GROK_STATE"
+          ;;
+      esac
+      exit 0
+    fi
+    case " $* " in
+      *' Enter '*)
+        if [ "$state" = launched ]; then
+          case "${FM_FAKE_GROK_MODE:-ready}" in
+            active) printf 'trust\n' > "$FM_FAKE_GROK_STATE" ;;
+            historical) printf 'history\n' > "$FM_FAKE_GROK_STATE" ;;
+            *) printf 'ready\n' > "$FM_FAKE_GROK_STATE" ;;
+          esac
+        fi
+        ;;
+    esac
+    exit 0
+    ;;
+  capture-pane)
+    start=
+    prev=
+    for arg in "$@"; do
+      if [ "$prev" = -S ]; then start=$arg; break; fi
+      [ "$arg" = -S ] && prev=-S || prev=
+    done
+    case "$state" in
+      trust)
+        if [ "$start" = -0 ]; then
+          printf '%s\n' "$FM_FAKE_PANE_PATH" 'Grok Build  1.0.40 [stable]'
+        else
+          render_dialog
+        fi
+        ;;
+      history) render_dialog; render_ready ;;
+      ready) render_ready ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$1/tmux"
+}
+
 make_spawn_case() {
   local name=$1 case_dir home proj wt fakebin grok_home id
   case_dir="$TMP_ROOT/$name"
@@ -15,9 +96,14 @@ make_spawn_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" gh-axi gh)
+  install_grok_tmux_fake "$fakebin"
   grok_home="$case_dir/grok"
   id="grok-$name-x1"
   mkdir -p "$grok_home"
+  : > "$case_dir/grok.state"
+  : > "$case_dir/grok-trust-answer.log"
+  : > "$case_dir/launch.log"
+  : > "$case_dir/tmux-calls.log"
   fm_test_spawn_home "$home"
   fm_test_spawn_brief "$home" "$id" brief
   fm_git_worktree "$proj" "$wt" "fm/$id"
@@ -25,8 +111,15 @@ make_spawn_case() {
 }
 
 run_grok_spawn() {
-  local home=$1 proj=$2 wt=$3 fakebin=$4 grok_home=$5 id=$6
+  local home=$1 proj=$2 wt=$3 fakebin=$4 grok_home=$5 id=$6 case_dir
+  case_dir=${home%/home}
   GROK_HOME="$grok_home" \
+    FM_FAKE_GROK_STATE="$case_dir/grok.state" \
+    FM_FAKE_GROK_MODE="${FM_FAKE_GROK_MODE:-ready}" \
+    FM_FAKE_GROK_TRUST_ANSWER_LOG="$case_dir/grok-trust-answer.log" \
+    FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_GROK_TRUST_POLLS=3 FM_GROK_TRUST_POLL_INTERVAL=0 \
     fm_test_run_spawn "$home" "$wt" "$fakebin" \
     "$id" "$proj" grok --mode no-mistakes --yolo off
 }
@@ -92,6 +185,53 @@ EOF
   pass "grok teardown removes pointer and token state"
 }
 
+test_grok_active_trust_dialog_below_visible_slice_fails() {
+  local rec case_dir home proj wt fakebin grok_home id out rc visible
+  rec=$(make_spawn_case trust-active)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  rc=0
+  out=$(FM_FAKE_GROK_MODE=active run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "grok spawn accepted an active project-folder trust dialog"
+  assert_contains "$out" "active project-folder trust dialog" \
+    "grok spawn did not report the active trust gate"
+  assert_contains "$out" "refusing to grant project content and hooks additional execution authority automatically" \
+    "grok spawn did not preserve the project-content trust boundary"
+  assert_grep ' -S -200' "$case_dir/tmux-calls.log" \
+    "grok trust detection did not inspect bounded history"
+  visible=$(FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_GROK_STATE="$case_dir/grok.state" FM_FAKE_PANE_PATH="$wt" \
+    "$fakebin/tmux" capture-pane -p -t fake -S -0)
+  assert_not_contains "$visible" "Do you trust the contents of this directory?" \
+    "the below-fold fixture left the active dialog title in its visible slice"
+  assert_contains "$visible" "Grok Build  1.0.40 [stable]" \
+    "the below-fold fixture did not retain the active Grok frame footer"
+  [ ! -s "$case_dir/grok-trust-answer.log" ] \
+    || fail "grok spawn answered the trust dialog instead of refusing it"
+  assert_not_contains "$out" "spawned $id" \
+    "grok trust refusal still reported a successful worker"
+  pass "fm-spawn: Grok detects an active trust frame above the visible slice and refuses its grant"
+}
+
+test_grok_historical_trust_dialog_does_not_block_dispatch() {
+  local rec case_dir home proj wt fakebin grok_home id out rc
+  rec=$(make_spawn_case trust-history)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  rc=0
+  out=$(FM_FAKE_GROK_MODE=historical run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id") || rc=$?
+  expect_code 0 "$rc" "historical Grok trust text followed by a live composer should not fail dispatch"
+  assert_contains "$out" "spawned $id harness=grok" \
+    "historical Grok trust text prevented a successful spawn"
+  assert_not_contains "$out" "active project-folder trust dialog" \
+    "historical Grok trust text was classified as active"
+  [ ! -s "$case_dir/grok-trust-answer.log" ] \
+    || fail "grok spawn answered historical trust text"
+  pass "fm-spawn: Grok ignores historical trust text followed by the current session surface"
+}
+
 test_fm_lock_recognizes_grok_holder() {
   local home fakebin out
   home="$TMP_ROOT/lock-home"
@@ -114,4 +254,6 @@ SH
 
 test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
+test_grok_active_trust_dialog_below_visible_slice_fails
+test_grok_historical_trust_dialog_does_not_block_dispatch
 test_fm_lock_recognizes_grok_holder

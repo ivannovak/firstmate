@@ -594,6 +594,23 @@ The real pane renders this inside a bordered box, omitted here for readability; 
 That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
 None of these three runs ever answered its dialog (Escape only, never Enter), so no credential store was written to and no model tokens were spent.
 
+## Grok project-folder trust
+
+Verified 2026-09-22 with grok 1.0.40 (eb1a2256660d) [stable] and tmux 3.7b on macOS arm64.
+The token-free guard launched the installed Grok with no prompt in a fresh private git directory containing one inert project hook and a throwaway `GROK_HOME` carrying only a private copy of the existing authentication file.
+It never answered the dialog and verified that the throwaway home acquired no `trusted_folders.toml`.
+The real active frame matched the production classifier from bounded history, a clipped tail without the dialog did not match, and the same frame followed by a newer session surface did not match.
+
+```sh
+bin/fm-test-run.sh tests/fm-grok-trust-dialog-live-e2e.test.sh
+```
+
+```text
+ok - grok 1.0.40 (eb1a2256660d) [stable]: active trust frame recognized from bounded history; clipped and historical forms rejected
+```
+
+The portable end-to-end regression is `tests/fm-grok-harness.test.sh`: its fake backend keeps the complete active frame in bounded history while the visible slice omits it, then separately keeps the same frame ahead of a current composer to prove historical text neither fails dispatch nor receives an answer.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.

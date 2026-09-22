@@ -322,7 +322,15 @@
 # each ready and dialog-free before the ordinary readiness gates can pass. A
 # blank viewport read proves nothing either way: it costs the poll and restarts
 # that count. A viewport read that fails outright fails readiness at once.
-# grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
+# Grok project configuration can gate a fresh worktree on a project-folder trust
+# dialog. Its title may sit above the visible slice of a short pane, so the
+# post-launch check reads bounded history and delegates the exact active-frame
+# predicate to bin/fm-grok-trust.sh. That predicate accepts only a complete final
+# dialog frame: later session output makes the same text historical and inert.
+# Firstmate never answers the dialog because doing so grants project content and
+# hooks additional execution authority; a positively active frame fails and
+# rolls back the spawn instead of reporting a worker that never read its brief.
+# Grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
@@ -3512,6 +3520,50 @@ spawn_send_key() { # <target> <key>
   esac
 }
 
+grok_capture() {
+  fm_backend_capture "$BACKEND" "$T" 200 "$W" 2>/dev/null || true
+}
+
+# A normal Grok session can follow trust-dialog text that the backend retains
+# in scrollback. Only session evidence AFTER the last dialog marker proves that
+# the frame is historical; evidence before a newer partial frame proves nothing.
+grok_session_surface_follows_trust() { # <plain-pane-capture>
+  printf '%s\n' "$1" | awk '
+    /Do you trust the contents of this directory\?/ ||
+      /Yes, proceed[[:space:]]+y[[:space:]]*$/ ||
+      /No, quit[[:space:]]+n[[:space:]]*$/ { trust = NR }
+    /Weekly limit left:/ || /Ctrl\+c:cancel/ || /Shift\+Tab:mode/ ||
+      /Ctrl\+x:shortcuts/ || /\[Dashboard\]/ || /Help improve Grok/ ||
+      /^[[:space:]]*Tip:/ || /│[[:space:]]*❯/ { session = NR }
+    END { exit !(session > trust) }
+  '
+}
+
+# The dialog normally paints before Grok submits its positional launch prompt.
+# Poll only until either its exact active final frame or a later normal session
+# surface appears. A timeout keeps the pre-existing launch posture: absence of a
+# positively classified dialog is never promoted into a trust decision.
+grok_active_trust_dialog_detected() {
+  local pane i=0 max=${FM_GROK_TRUST_POLLS:-20} interval=${FM_GROK_TRUST_POLL_INTERVAL:-0.25}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(grok_capture)
+    if [ -n "$pane" ] && printf '%s\n' "$pane" | "$FM_ROOT/bin/fm-grok-trust.sh" active; then
+      return 0
+    fi
+    if [ -n "$pane" ] && grok_session_surface_follows_trust "$pane"; then
+      return 1
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+grok_spawn_fail() { # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; the unconfirmed endpoint will be closed" >&2
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -4841,6 +4893,10 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = grok ] && grok_active_trust_dialog_detected; then
+  grok_spawn_fail "grok stopped at an active project-folder trust dialog; refusing to grant project content and hooks additional execution authority automatically"
+  exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

@@ -32,8 +32,13 @@ Tmux and Herdr now route captures through `../../../bin/fm-composer-lib.sh`, whi
 `../../../docs/herdr-backend.md` owns the boundary and `../../../tests/fm-backend-herdr.test.sh` covers it.
 
 The "Run Grok Build in a project directory?" picker appears only outside a project, such as home, Desktop, Downloads, or `/tmp`.
-The spawn starts in the isolated git root, so Grok trusts it and needs no key.
+The spawn starts in the isolated git root, so that picker needs no key.
 For unavoidable non-project launch, `[hints] project_picker_disabled = true` in `~/.grok/config.toml` suppresses the picker.
+
+Grok 1.0.40 separately shows `Do you trust the contents of this directory?` when a fresh git directory contains project configuration such as project hooks.
+Firstmate does not grant that trust automatically because it authorizes project content and hooks to execute with additional authority.
+The spawn reads bounded pane history because a short pane can place the dialog title above its visible slice, but it refuses only the complete final dialog frame; the same text followed by a newer session surface is historical and does not block dispatch.
+`../../../bin/fm-grok-trust.sh` owns that active-frame predicate, `../../../tests/fm-grok-harness.test.sh` pins the dispatch outcomes, and `../../../tests/fm-grok-trust-dialog-live-e2e.test.sh` is the token-free real-harness drift guard.
 
 ## Composer
 
