@@ -107,7 +107,7 @@ Grok can stop at a project-folder trust dialog, and Firstmate refuses to dispatc
 A pane too short for the dialog body makes Grok repaint a clipped frame and pushes the complete one above the visible slice, where only the pane's own history can still hold it - and the alternate screen has no history at all, so those rows would be destroyed and a waiting dialog would read as no dialog.
 The switch costs an ordinary session nothing, because a harness that repaints in place scrolls nothing and the pane's history stays empty until something really displaces a row.
 Two consequences are visible to an operator, both measured on grok 1.0.40: the pane keeps the session's own rows in scrollback, which the alternate screen discards entirely, and when Grok exits the pane is not swapped back to the screen it showed before the launch - the shell simply continues, with that earlier screen in the same scrollback.
-Only Grok panes are switched, and only on tmux; `verification/runtime-backends.md` records the measurement behind both halves.
+Only Grok panes are switched, and only on tmux; [`verification/runtime-backends.md`](verification/runtime-backends.md#alternate-screen-and-pane-history) records the measurement behind both halves.
 
 ## Limits and regression entry points
 
