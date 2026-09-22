@@ -3558,9 +3558,13 @@ grok_trust_baseline() { # <launch-line> <launch-file-name>
 # than that line wraps it, and a bounded capture reports the wrapped rows
 # separately, so the name is searched across the concatenated rows and the
 # boundary is the row its last occurrence ends on. The pre-launch read anchors
-# the same line from the other side: its own rows that are contiguous pieces of
-# the submitted text are this launch's echo wherever they reappear, which still
-# places the boundary when the capture window has cut the name in half. A capture
+# the same line from the other side: its own row that ends the submitted text is
+# the last row of this launch's echo wherever it reappears, which still places the
+# boundary when the capture no longer carries the name whole. Only that final row
+# anchors, never an interior piece of the line: a path fragment is ordinary text
+# that a previous session's scrollback can hold by coincidence, and anchoring on
+# one would hand exactly the material this check exists to exclude back as this
+# launch's own output. A capture
 # that carries neither and retains no nonblank line the pre-launch read held has
 # scrolled or cleared past that read entirely, which makes all of it post-launch.
 # Anything else leaves the boundary unknown, including a pre-launch read that
@@ -3578,7 +3582,10 @@ grok_post_launch_content() { # <plain-pane-capture>
         for (i = 1; i <= n; i++) {
           if (prior[i] !~ /[^[:space:]]/) { continue }
           held[prior[i]] = 1
-          if (literal != "" && index(literal, prior[i])) { echoed[prior[i]] = 1 }
+          if (literal != "" && length(prior[i]) <= length(literal) &&
+            substr(literal, length(literal) - length(prior[i]) + 1) == prior[i]) {
+            echoed[prior[i]] = 1
+          }
         }
       }
       {

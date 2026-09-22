@@ -20,11 +20,24 @@ render_dialog() {
 render_ready() {
   printf 'Tip: Use @ to attach files.\n╭────────────────────────────────╮\n│ ❯                              │\n╰── Weekly limit left: 50%% ──────╯\nShift+Tab:mode  │  Ctrl+x:shortcuts\nGrok Build  1.0.40 [stable]\n'
 }
+# An interior piece of the staged launch line, the shape a previous session's
+# scrollback can hold by coincidence: a run from the home-identity token in the
+# staged path, which ends nowhere near the end of that line.
+render_launch_fragment() {
+  [ -s "${FM_FAKE_GROK_ECHO:-/dev/null}" ] || return 0
+  awk '{ print substr($0, 20, 14) }' "$FM_FAKE_GROK_ECHO"
+}
 # The scrollback an adopted endpoint carries into the launch: a previous Grok
 # session's own surface, which is not evidence about this launch.
 render_prior_session() {
-  [ "${FM_FAKE_GROK_MODE:-ready}" = stale ] || return 0
-  render_ready
+  case "${FM_FAKE_GROK_MODE:-ready}" in
+    stale) render_ready ;;
+    fragment)
+      printf 'PRIOR-SESSION-TOP\n'
+      render_launch_fragment
+      render_ready
+      ;;
+  esac
 }
 # The shell's echo of the staged launch line, which every real backend leaves in
 # the pane between the literal and the dialog this launch renders. The wrapped
@@ -84,6 +97,7 @@ case "${1:-}" in
             historical) printf 'history\n' > "$FM_FAKE_GROK_STATE" ;;
             stale) printf 'stale\n' > "$FM_FAKE_GROK_STATE" ;;
             wrapped) printf 'history\n' > "$FM_FAKE_GROK_STATE" ;;
+            fragment) printf 'fragment\n' > "$FM_FAKE_GROK_STATE" ;;
             *) printf 'ready\n' > "$FM_FAKE_GROK_STATE" ;;
           esac
         fi
@@ -102,7 +116,7 @@ case "${1:-}" in
     # trust gate, so suites can assert how far it had to look.
     polls=0
     case "$state" in
-      trust|history|ready|stale)
+      trust|history|ready|stale|fragment)
         polls=$(cat "${FM_FAKE_GROK_POLL_COUNT:-/dev/null}" 2>/dev/null || true)
         case "$polls" in ''|*[!0-9]*) polls=0 ;; esac
         polls=$((polls + 1))
@@ -126,6 +140,13 @@ case "${1:-}" in
         # renders arrives only on the poll after that.
         render_prior_session
         render_launch_echo
+        [ "$polls" -lt 2 ] || render_dialog
+        ;;
+      fragment)
+        # This launch's TUI has painted over the row carrying the echo, so the
+        # capture keeps only the adopted scrollback - including its coincidental
+        # fragment of the staged path - until the dialog renders.
+        render_prior_session
         [ "$polls" -lt 2 ] || render_dialog
         ;;
     esac
@@ -295,6 +316,37 @@ EOF
   pass "fm-spawn: Grok ignores an adopted session surface and still catches the dialog this launch renders"
 }
 
+test_grok_scrollback_fragment_of_launch_line_is_not_a_boundary() {
+  local rec case_dir home proj wt fakebin grok_home id out rc literal fragment polls
+  rec=$(make_spawn_case trust-fragment)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  rc=0
+  out=$(FM_FAKE_GROK_MODE=fragment run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id") || rc=$?
+  literal=$(cat "$case_dir/grok-echo.log")
+  fragment=$(printf '%s\n' "$literal" | awk '{ print substr($0, 20, 14) }')
+  [ -n "$fragment" ] || fail "the fragment fixture derived no piece of the staged launch line"
+  case "$literal" in
+    *"$fragment"*) ;;
+    *) fail "the fragment fixture row is not a piece of the staged launch line at all" ;;
+  esac
+  case "$literal" in
+    *"$fragment") fail "the fragment fixture row ends the staged launch line, so it is an echo row rather than an interior piece" ;;
+  esac
+  [ "$rc" -ne 0 ] || fail "grok spawn read adopted scrollback as this launch's output because a prior row was a fragment of the staged launch line"
+  assert_contains "$out" "active project-folder trust dialog" \
+    "grok spawn did not report the trust gate that rendered after the adopted scrollback"
+  polls=$(cat "$case_dir/grok-poll-count")
+  [ "${polls:-0}" -ge 2 ] \
+    || fail "grok trust detection accepted an interior fragment of the staged launch line as its post-launch boundary"
+  [ ! -s "$case_dir/grok-trust-answer.log" ] \
+    || fail "grok spawn answered the trust dialog instead of refusing it"
+  assert_not_contains "$out" "spawned $id" \
+    "grok trust refusal still reported a successful worker"
+  pass "fm-spawn: Grok refuses to anchor its post-launch boundary on an interior fragment of the staged launch line"
+}
+
 test_grok_wrapped_launch_echo_keeps_post_launch_boundary() {
   local rec case_dir home proj wt fakebin grok_home id out rc mark rows flat polls
   rec=$(make_spawn_case trust-wrapped)
@@ -368,6 +420,7 @@ test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
 test_grok_active_trust_dialog_below_visible_slice_fails
 test_grok_trust_dialog_after_adopted_scrollback_fails
+test_grok_scrollback_fragment_of_launch_line_is_not_a_boundary
 test_grok_wrapped_launch_echo_keeps_post_launch_boundary
 test_grok_historical_trust_dialog_does_not_block_dispatch
 test_fm_lock_recognizes_grok_holder

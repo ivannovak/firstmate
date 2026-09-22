@@ -39,7 +39,7 @@ Grok 1.0.40 separately shows `Do you trust the contents of this directory?` when
 Firstmate does not grant that trust automatically because it authorizes project content and hooks to execute with additional authority.
 The spawn reads bounded pane history because a short pane can place the dialog title above its visible slice, but it refuses only the complete final dialog frame; the same text followed by a newer session surface is historical and does not block dispatch.
 That history can predate the launch on a relaunch, which adopts the recorded endpoint and its scrollback, so the check classifies only what the launch itself painted after the staged launch line, and withholds its no-dialog verdict while that boundary is unknown.
-A pane narrower than that line wraps it into rows a bounded capture reports separately, so the line is matched across the concatenated rows and anchored by the pre-launch capture's own echo rows rather than within any single row.
+A pane narrower than that line wraps it into rows a bounded capture reports separately, so the line is matched across the concatenated rows rather than within any single row, and anchored by the one pre-launch row that ends it; an interior piece of the path never anchors, because adopted scrollback can hold such a row by coincidence.
 `../../../bin/fm-grok-trust.sh` owns that active-frame predicate, `../../../tests/fm-grok-harness.test.sh` pins the dispatch outcomes, and `../../../tests/fm-grok-trust-dialog-live-e2e.test.sh` is the token-free real-harness drift guard.
 
 ## Composer
