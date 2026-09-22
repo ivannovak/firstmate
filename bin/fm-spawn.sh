@@ -330,6 +330,9 @@
 # makes the text historical and inert, while a clipped repaint of the same frame -
 # the only thing that can put a rendered dialog above the fold at all - leaves it
 # waiting.
+# That history is not a given: a default tmux pane runs a full-screen harness on
+# the alternate screen, which has none, so the spawn asks the backend to keep
+# this pane's displaced rows before Grok is launched into it.
 # Bounded history can also predate this launch, because a relaunch adopts the
 # recorded endpoint and its scrollback, so the check classifies only what this
 # launch painted: the content after the staged launch line carrying this
@@ -3496,6 +3499,26 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+# Grok's trust gate below recovers a dialog frame the harness pushed above the
+# visible slice, and it can only recover one the pane kept. On a default tmux
+# pane there is nothing to keep: a full-screen harness runs on the alternate
+# screen, whose displaced rows are destroyed rather than scrolled, so the
+# bounded read returns the viewport, the clipped repaint in it carries no title,
+# and a dialog that is still waiting reads as no dialog at all - the one verdict
+# that hands project content and hooks the authority this gate exists to
+# withhold. Ask the backend for that history now, while the pane still holds
+# nothing but its shell: the option governs the harness's own switch to a
+# full-screen surface, so it takes only if it is in place before Grok starts.
+# A backend with no such primitive keeps exactly its previous behavior rather
+# than being refused a spawn: only the displaced-frame recovery depends on this,
+# a dialog still in view is classified from the same read either way, and
+# whether a non-tmux surface loses a displaced row at all has not been observed
+# either way (bin/fm-backend.sh's FM_BACKEND_SCROLLBACK_RETAIN owns that
+# boundary).
+if [ "$HARNESS" = grok ] && fm_backend_scrollback_retain_supported "$BACKEND"; then
+  fm_backend_scrollback_retain "$BACKEND" "$T" ||
+    echo "warning: $BACKEND would not keep pane history for $T; a Grok trust dialog displaced above that pane's visible slice cannot be recovered from it" >&2
+fi
 spawn_send_text_line() { # <target> <text>
   case "$BACKEND" in
   tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;

@@ -416,6 +416,40 @@ EOF
   pass "fm-spawn: Grok ignores historical trust text followed by the current session surface"
 }
 
+# The gate above can only recover a displaced dialog from a pane that KEPT it,
+# and the pane firstmate creates keeps nothing by default: a full-screen harness
+# on tmux's alternate screen has no history, so the rows a repaint displaces are
+# destroyed and the bounded read returns the viewport whatever it asks for. This
+# pins the spawn's own request for that history - that it is made, that it names
+# this task's own window, and that it lands before the first keystroke, since the
+# option governs the harness's switch to a full-screen surface and one set after
+# Grok is already painting governs nothing. What the option then does to a real
+# pane is tmux's behavior rather than this fake's, and is pinned on a real server
+# by tests/fm-backend-tmux-smoke.test.sh and against live Grok by
+# tests/fm-grok-trust-dialog-live-e2e.test.sh.
+test_grok_pane_keeps_the_rows_a_displaced_dialog_lands_in() {
+  local rec case_dir home proj wt fakebin grok_home id out status retain typed
+  rec=$(make_spawn_case trust-retain)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
+  status=$?
+  expect_code 0 "$status" "grok spawn should succeed"
+  assert_contains "$out" "spawned $id harness=grok" "grok spawn did not report success"
+  retain=$(grep -n 'alternate-screen off' "$case_dir/tmux-calls.log" | head -1 | cut -d: -f1)
+  [ -n "$retain" ] \
+    || fail "grok spawn never asked its pane to keep the rows a displaced trust frame lands in"
+  grep -qxF "set-window-option -t firstmate:fm-$id alternate-screen off" \
+    "$case_dir/tmux-calls.log" \
+    || fail "grok spawn asked for pane history somewhere other than this task's own window"
+  typed=$(grep -n '^send-keys ' "$case_dir/tmux-calls.log" | head -1 | cut -d: -f1)
+  [ -n "$typed" ] || fail "the fixture recorded no keystroke for this spawn to order the request against"
+  [ "$retain" -lt "$typed" ] \
+    || fail "grok spawn asked for pane history only after it had started typing into the pane, where the option can no longer govern the harness's own screen"
+  pass "fm-spawn: a Grok pane is asked to keep its displaced rows before anything is typed into it"
+}
+
 test_fm_lock_recognizes_grok_holder() {
   local home fakebin out
   home="$TMP_ROOT/lock-home"
@@ -443,4 +477,5 @@ test_grok_trust_dialog_after_adopted_scrollback_fails
 test_grok_scrollback_fragment_of_launch_line_is_not_a_boundary
 test_grok_wrapped_launch_echo_keeps_post_launch_boundary
 test_grok_historical_trust_dialog_does_not_block_dispatch
+test_grok_pane_keeps_the_rows_a_displaced_dialog_lands_in
 test_fm_lock_recognizes_grok_holder

@@ -56,16 +56,59 @@ git -C "$PROJECT" init -q || fail "could not initialize the isolated Grok projec
 printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"true"}]}]}}' \
   > "$PROJECT/.grok/hooks/fm-trust-probe.json"
 
+# The pane below has to be the pane bin/fm-spawn.sh creates, not one this guard
+# configured to suit its own arms. Grok runs on the alternate screen by default,
+# where tmux keeps no history at all, so a bounded read returns the viewport and
+# nothing above it and the scrolled-out arm could never fire; a guard that
+# turned that option off by hand would prove the detector only for a pane no
+# spawn produces. So everything this pane owes to firstmate comes from the
+# production primitive, called exactly as the spawn calls it, through the
+# private-socket PATH shim tests/fm-backend-tmux-smoke.test.sh already uses to
+# run the real adapter against an isolated server.
+SHIM="$LAB/shim"
+mkdir -p "$SHIM"
+cat > "$SHIM/tmux" <<SH
+#!/usr/bin/env bash
+exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+SH
+chmod +x "$SHIM/tmux"
+
+spawn_configures_pane() { # <target>
+  PATH="$SHIM:$PATH" bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_scrollback_retain tmux "$2"
+  ' fm-grok-trust-live "$ROOT" "$1"
+}
+pane_alternate_screen() { # <target>
+  "$REAL_TMUX" -L "$SOCKET" show-options -w -A -v -t "$1" alternate-screen
+}
+
+# The spawn configures a pane that exists and launches Grok into it afterwards,
+# and the option only governs a harness that has not started yet. So the launch
+# waits on a trigger here rather than racing Grok's own startup for the pane:
+# the ordering this depends on is then a fact of the sequence, not of who won.
+LAUNCHER="$LAB/launch-grok.sh"
+cat > "$LAUNCHER" <<SH
+#!/usr/bin/env bash
+while [ ! -e "$LAB/launch-now" ]; do sleep 0.05; done
+exec env GROK_HOME='$ISOLATED_HOME' '$REAL_GROK' --always-approve
+SH
+chmod +x "$LAUNCHER"
+
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -x 80 -y 12 -c "$PROJECT" \
-  "exec env GROK_HOME='$ISOLATED_HOME' '$REAL_GROK' --always-approve" \
-  || fail "could not launch $VERSION in the isolated tmux server"
-# Grok runs on the alternate screen by default, where tmux keeps no history at
-# all, so a bounded read there returns the viewport and nothing above it. The
-# scrolled-out arm below needs the pane to retain what the resize pushed out of
-# view, so the option is turned off before Grok has started painting and the
-# arm asserts its own precondition rather than trusting that it took.
-"$REAL_TMUX" -L "$SOCKET" set-window-option -t "$SESSION" alternate-screen off \
-  || fail "could not disable the alternate screen for the isolated Grok pane"
+  "exec $LAUNCHER" \
+  || fail "could not stage $VERSION in the isolated tmux server"
+# Prove the instrument before using it: a tmux configuration that had already
+# disabled the alternate screen would make the production call below a no-op and
+# leave every arm that follows inert, so the pane is required to start on the
+# default, and the primitive is required to be what moves it off.
+[ "$(pane_alternate_screen "$SESSION")" = on ] \
+  || fail "the isolated Grok pane did not start on tmux's default alternate screen, so this guard would not be testing the pane a spawn creates"
+spawn_configures_pane "$SESSION" \
+  || fail "the production scrollback-retention primitive failed on the isolated Grok pane"
+[ "$(pane_alternate_screen "$SESSION")" = off ] \
+  || fail "the production scrollback-retention primitive left the isolated Grok pane on a screen that keeps no history"
+: > "$LAB/launch-now"
 
 found=0
 for _ in $(seq 1 40); do
@@ -87,6 +130,24 @@ if { cat "$CAPTURE"; printf '%s\n' 'Tip: current Grok session' 'Weekly limit lef
   | "$CLASSIFIER" active; then
   fail "the classifier accepted trust text followed by a newer session surface"
 fi
+# Something nonblank painted after the newest complete trust frame is the whole
+# reason the old "nothing follows the footer" rule could not fire on a displaced
+# dialog. Asserting the loop below landed on a capture that carries it is what
+# stops this arm from passing against a pane the retired rule would have passed
+# too: the resize is observed to push the frame out of view a beat before Grok
+# repaints, and in that beat the complete frame IS the last thing the capture
+# holds.
+frame_is_followed() { # <bounded-capture-file>
+  awk -v title="Do you trust the contents of this directory?" '
+    index($0, title) { start = NR; quit = 0; footer = 0 }
+    start && /No, quit[[:space:]]+n[[:space:]]*$/ { quit = NR }
+    start && quit && !footer &&
+      /Grok Build[[:space:]]+[0-9][^[:space:]]*[[:space:]]+\[[^]]+\][[:space:]]*$/ { footer = NR }
+    /[^[:space:]]/ { last = NR }
+    END { exit !(footer > 0 && last > footer) }
+  ' "$1"
+}
+
 # The behavior the gate exists for: the dialog is still waiting, but the pane is
 # now too short to show it. Grok repaints a clipped frame - header row and build
 # footer, no title and no shortcuts - which is what pushes the complete frame
@@ -95,24 +156,40 @@ fi
 # here at all.
 "$REAL_TMUX" -L "$SOCKET" resize-window -t "$SESSION" -x 80 -y 5 \
   || fail "could not shrink the isolated Grok pane below its trust frame"
+# A visible slice that is no tail of its own bounded history is a pane no
+# terminal geometry produces, and a verdict proven only against one proves
+# nothing about a real operator's pane. The two reads below are separate tmux
+# round trips, though, so a repaint landing between them pairs a slice with a
+# history read of a DIFFERENT pane state - observed here as a footer row the
+# slice holds and the history taken milliseconds later has already moved. That
+# pair describes no pane at all, so the loop keeps polling until one settled
+# pane answers both reads, and each way this can time out fails with its own
+# reason rather than being asserted against a straddled pair.
+displaced=0
 repainted=0
+settled=0
 for _ in $(seq 1 40); do
   "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -0 > "$SLICE" 2>/dev/null || true
   "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -120 > "$SCROLLED" 2>/dev/null || true
   if ! grep -Fq 'Do you trust the contents of this directory?' "$SLICE" \
     && grep -Fq 'Do you trust the contents of this directory?' "$SCROLLED"; then
-    repainted=1
-    break
+    displaced=1
+    if frame_is_followed "$SCROLLED"; then
+      repainted=1
+      if [ "$(tail -n "$(wc -l < "$SLICE")" "$SCROLLED")" = "$(cat "$SLICE")" ]; then
+        settled=1
+        break
+      fi
+    fi
   fi
   sleep 0.1
 done
+[ "$displaced" -eq 1 ] \
+  || fail "$VERSION did not push its trust frame above the visible slice of a shortened pane"
 [ "$repainted" -eq 1 ] \
-  || fail "$VERSION did not repaint its trust frame above the visible slice of a shortened pane"
-# A visible slice that is no tail of its own bounded history is a pane no
-# terminal geometry produces, and a verdict proven only against one proves
-# nothing about a real operator's pane.
-[ "$(tail -n "$(wc -l < "$SLICE")" "$SCROLLED")" = "$(cat "$SLICE")" ] \
-  || fail "the shortened pane's visible slice is not the tail of its own bounded history"
+  || fail "$VERSION left its complete trust frame as the last content of the shortened pane, so this arm never exercised a displaced dialog the retired rule could not classify"
+[ "$settled" -eq 1 ] \
+  || fail "the shortened pane's visible slice never settled as the tail of its own bounded history"
 "$CLASSIFIER" active < "$SCROLLED" \
   || fail "$VERSION left a trust dialog waiting above the visible slice that the production classifier did not recognize"
 if "$CLASSIFIER" active < "$SLICE"; then
