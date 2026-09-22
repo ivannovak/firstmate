@@ -28,8 +28,8 @@
 # merge_waived_check=<name> line in the task's meta beside the merge-authority
 # record, so an authorized red merge is never recorded as a fully green one; a
 # waiver that covered no red check is reported and recorded nowhere, because
-# nothing was waived. After gh returns success, GitHub's live state is read back and
-# accepted only when the pull request is merged or in the merge queue. gh's
+# nothing was waived. After gh returns success, GitHub's live state is read back
+# and accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
 # refuses, reporting the failed gh read and naming both failed reads when the
