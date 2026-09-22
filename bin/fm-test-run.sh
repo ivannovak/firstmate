@@ -726,7 +726,6 @@ tests/fm-gitignore-config.test.sh 58
 tests/fm-gotmp.test.sh 1320
 tests/fm-grok-continuity-live-e2e.test.sh 45
 tests/fm-grok-stop-live-e2e.test.sh 46
-tests/fm-grok-trust-dialog-live-e2e.test.sh 1000
 tests/fm-guard-stale-banner.test.sh 14968
 tests/fm-harness-adapter-instructions-live-e2e.test.sh 48
 tests/fm-harness-adapter-references.test.sh 83

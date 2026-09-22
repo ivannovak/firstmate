@@ -596,7 +596,7 @@ None of these three runs ever answered its dialog (Escape only, never Enter), so
 
 ## Grok project-folder trust
 
-Verified 2026-09-22 with grok 1.0.40 (eb1a2256660d) [stable] and tmux 3.7b on macOS arm64.
+Verified 2026-09-21 with grok 1.0.40 (eb1a2256660d) [stable] and tmux 3.7b on macOS arm64.
 The token-free guard launched the installed Grok with no prompt in a fresh private git directory containing one inert project hook and a throwaway `GROK_HOME` carrying only a private copy of the existing authentication file.
 It never answered the dialog and verified that the throwaway home acquired no `trusted_folders.toml`.
 The real active frame matched the production classifier from bounded history, a clipped tail without the dialog did not match, and the same frame followed by a newer session surface did not match.
@@ -610,6 +610,7 @@ ok - grok 1.0.40 (eb1a2256660d) [stable]: active trust frame recognized from bou
 ```
 
 The portable end-to-end regression is `tests/fm-grok-harness.test.sh`: its fake backend keeps the complete active frame in bounded history while the visible slice omits it, then separately keeps the same frame ahead of a current composer to prove historical text neither fails dispatch nor receives an answer.
+A third case gives the pane a previous session's surface before the launch and renders the dialog only on the poll after that, which pins that an adopted endpoint's scrollback is never read as evidence about the launch that adopted it.
 
 ## Codex hook trust
 

@@ -327,6 +327,12 @@
 # post-launch check reads bounded history and delegates the exact active-frame
 # predicate to bin/fm-grok-trust.sh. That predicate accepts only a complete final
 # dialog frame: later session output makes the same text historical and inert.
+# Bounded history can also predate this launch, because a relaunch adopts the
+# recorded endpoint and its scrollback, so the check classifies only what this
+# launch painted: the content after the staged launch line carrying this
+# incarnation's nonce, or the whole capture once nothing the pre-launch read held
+# survives in it. While that boundary is unknown the check withholds its
+# no-dialog verdict rather than read a previous session's surface as this one's.
 # Firstmate never answers the dialog because doing so grants project content and
 # hooks additional execution authority; a positively active frame fails and
 # rolls back the spawn instead of reporting a worker that never read its brief.
@@ -3524,10 +3530,54 @@ grok_capture() {
   fm_backend_capture "$BACKEND" "$T" 200 "$W" 2>/dev/null || true
 }
 
+# The pane this launch types into can already hold a previous Grok session: a
+# relaunch adopts the recorded endpoint and everything in its scrollback. These
+# three record what the pane held before the launch line was submitted, so the
+# trust check can tell that scrollback apart from what this launch paints.
+GROK_TRUST_BASELINE=
+GROK_TRUST_BASELINE_READ=0
+GROK_TRUST_LAUNCH_MARK=
+
+grok_trust_baseline() { # <launch-line-mark>
+  GROK_TRUST_LAUNCH_MARK=$1
+  GROK_TRUST_BASELINE=
+  GROK_TRUST_BASELINE_READ=0
+  GROK_TRUST_BASELINE=$(fm_backend_capture "$BACKEND" "$T" 200 "$W" 2>/dev/null) || return 0
+  GROK_TRUST_BASELINE_READ=1
+}
+
+# Print the part of <plain-pane-capture> that this launch painted, and fail when
+# the capture carries no proof of where that part starts. The staged launch line
+# is submitted into the pane by this incarnation and names a file whose nonce
+# belongs to it alone, so content after its last occurrence is this launch's own.
+# A capture that no longer holds it and retains no nonblank line the pre-launch
+# read held has scrolled or cleared past that read entirely, which makes all of
+# it post-launch. Anything else leaves the boundary unknown, including a
+# pre-launch read that failed outright.
+grok_post_launch_content() { # <plain-pane-capture>
+  [ "$GROK_TRUST_BASELINE_READ" -eq 1 ] || return 1
+  printf '%s\n' "$1" |
+    FM_GROK_TRUST_BASELINE="$GROK_TRUST_BASELINE" awk -v mark="$GROK_TRUST_LAUNCH_MARK" '
+      BEGIN {
+        n = split(ENVIRON["FM_GROK_TRUST_BASELINE"], prior, "\n")
+        for (i = 1; i <= n; i++) {
+          if (prior[i] ~ /[^[:space:]]/) held[prior[i]] = 1
+        }
+      }
+      { line[NR] = $0 }
+      mark != "" && index($0, mark) { launched = NR }
+      /[^[:space:]]/ && ($0 in held) { survives = 1 }
+      END {
+        if (launched == 0 && survives) { exit 1 }
+        for (i = launched + 1; i <= NR; i++) { print line[i] }
+      }
+    '
+}
+
 # A normal Grok session can follow trust-dialog text that the backend retains
 # in scrollback. Only session evidence AFTER the last dialog marker proves that
 # the frame is historical; evidence before a newer partial frame proves nothing.
-grok_session_surface_follows_trust() { # <plain-pane-capture>
+grok_session_surface_follows_trust() { # <post-launch-pane-content>
   printf '%s\n' "$1" | awk '
     /Do you trust the contents of this directory\?/ ||
       /Yes, proceed[[:space:]]+y[[:space:]]*$/ ||
@@ -3541,17 +3591,30 @@ grok_session_surface_follows_trust() { # <plain-pane-capture>
 
 # The dialog normally paints before Grok submits its positional launch prompt.
 # Poll only until either its exact active final frame or a later normal session
-# surface appears. A timeout keeps the pre-existing launch posture: absence of a
-# positively classified dialog is never promoted into a trust decision.
+# surface appears, both read from what this launch painted: a surface the pane
+# already carried is never evidence that this launch cleared a dialog. While that
+# boundary is unknown the active frame is still classified from the whole
+# capture, which can only refuse, never pass. The budget matches the other launch
+# gates in this script at 30s, and a timeout keeps the pre-existing launch
+# posture: absence of a positively classified dialog is never promoted into a
+# trust decision.
 grok_active_trust_dialog_detected() {
-  local pane i=0 max=${FM_GROK_TRUST_POLLS:-20} interval=${FM_GROK_TRUST_POLL_INTERVAL:-0.25}
+  local pane painted i=0 max=${FM_GROK_TRUST_POLLS:-60} interval=${FM_GROK_TRUST_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
     pane=$(grok_capture)
-    if [ -n "$pane" ] && printf '%s\n' "$pane" | "$FM_ROOT/bin/fm-grok-trust.sh" active; then
-      return 0
-    fi
-    if [ -n "$pane" ] && grok_session_surface_follows_trust "$pane"; then
-      return 1
+    if [ -n "$pane" ]; then
+      if painted=$(grok_post_launch_content "$pane"); then
+        if [ -n "$painted" ]; then
+          if printf '%s\n' "$painted" | "$FM_ROOT/bin/fm-grok-trust.sh" active; then
+            return 0
+          fi
+          if grok_session_surface_follows_trust "$painted"; then
+            return 1
+          fi
+        fi
+      elif printf '%s\n' "$pane" | "$FM_ROOT/bin/fm-grok-trust.sh" active; then
+        return 0
+      fi
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
@@ -4891,6 +4954,9 @@ sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
+fi
+if [ "$HARNESS" = grok ]; then
+  grok_trust_baseline "$(basename "$LAUNCH_FILE")"
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = grok ] && grok_active_trust_dialog_detected; then

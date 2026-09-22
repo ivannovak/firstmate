@@ -38,6 +38,7 @@ For unavoidable non-project launch, `[hints] project_picker_disabled = true` in 
 Grok 1.0.40 separately shows `Do you trust the contents of this directory?` when a fresh git directory contains project configuration such as project hooks.
 Firstmate does not grant that trust automatically because it authorizes project content and hooks to execute with additional authority.
 The spawn reads bounded pane history because a short pane can place the dialog title above its visible slice, but it refuses only the complete final dialog frame; the same text followed by a newer session surface is historical and does not block dispatch.
+That history can predate the launch on a relaunch, which adopts the recorded endpoint and its scrollback, so the check classifies only what the launch itself painted after the staged launch line, and withholds its no-dialog verdict while that boundary is unknown.
 `../../../bin/fm-grok-trust.sh` owns that active-frame predicate, `../../../tests/fm-grok-harness.test.sh` pins the dispatch outcomes, and `../../../tests/fm-grok-trust-dialog-live-e2e.test.sh` is the token-free real-harness drift guard.
 
 ## Composer

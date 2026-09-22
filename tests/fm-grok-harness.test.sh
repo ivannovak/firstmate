@@ -20,6 +20,18 @@ render_dialog() {
 render_ready() {
   printf 'Tip: Use @ to attach files.\n╭────────────────────────────────╮\n│ ❯                              │\n╰── Weekly limit left: 50%% ──────╯\nShift+Tab:mode  │  Ctrl+x:shortcuts\nGrok Build  1.0.40 [stable]\n'
 }
+# The scrollback an adopted endpoint carries into the launch: a previous Grok
+# session's own surface, which is not evidence about this launch.
+render_prior_session() {
+  [ "${FM_FAKE_GROK_MODE:-ready}" = stale ] || return 0
+  render_ready
+}
+# The shell's echo of the staged launch line, which every real backend leaves in
+# the pane between the literal and the dialog this launch renders.
+render_launch_echo() {
+  [ -s "${FM_FAKE_GROK_ECHO:-/dev/null}" ] || return 0
+  cat "$FM_FAKE_GROK_ECHO"
+}
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
 esac
@@ -39,6 +51,7 @@ case "${1:-}" in
         ". '"*"'")
           staged=${literal#". '"}
           staged=${staged%"'"}
+          printf '%s\n' "$literal" > "$FM_FAKE_GROK_ECHO"
           [ ! -f "$staged" ] || literal=$(cat "$staged")
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_GROK_STATE"
@@ -56,6 +69,7 @@ case "${1:-}" in
           case "${FM_FAKE_GROK_MODE:-ready}" in
             active) printf 'trust\n' > "$FM_FAKE_GROK_STATE" ;;
             historical) printf 'history\n' > "$FM_FAKE_GROK_STATE" ;;
+            stale) printf 'stale\n' > "$FM_FAKE_GROK_STATE" ;;
             *) printf 'ready\n' > "$FM_FAKE_GROK_STATE" ;;
           esac
         fi
@@ -75,11 +89,23 @@ case "${1:-}" in
         if [ "$start" = -0 ]; then
           printf '%s\n' "$FM_FAKE_PANE_PATH" 'Grok Build  1.0.40 [stable]'
         else
-          render_dialog
+          render_prior_session; render_launch_echo; render_dialog
         fi
         ;;
-      history) render_dialog; render_ready ;;
-      ready) render_ready ;;
+      history) render_prior_session; render_launch_echo; render_dialog; render_ready ;;
+      ready) render_prior_session; render_launch_echo; render_ready ;;
+      launched) render_prior_session; render_launch_echo ;;
+      stale)
+        # This launch has painted nothing yet on its first poll; the dialog it
+        # renders arrives only on the poll after that.
+        polls=$(cat "$FM_FAKE_GROK_POLL_COUNT" 2>/dev/null || true)
+        case "$polls" in ''|*[!0-9]*) polls=0 ;; esac
+        polls=$((polls + 1))
+        printf '%s\n' "$polls" > "$FM_FAKE_GROK_POLL_COUNT"
+        render_prior_session
+        render_launch_echo
+        [ "$polls" -lt 2 ] || render_dialog
+        ;;
     esac
     exit 0
     ;;
@@ -102,6 +128,8 @@ make_spawn_case() {
   mkdir -p "$grok_home"
   : > "$case_dir/grok.state"
   : > "$case_dir/grok-trust-answer.log"
+  : > "$case_dir/grok-echo.log"
+  : > "$case_dir/grok-poll-count"
   : > "$case_dir/launch.log"
   : > "$case_dir/tmux-calls.log"
   fm_test_spawn_home "$home"
@@ -117,6 +145,8 @@ run_grok_spawn() {
     FM_FAKE_GROK_STATE="$case_dir/grok.state" \
     FM_FAKE_GROK_MODE="${FM_FAKE_GROK_MODE:-ready}" \
     FM_FAKE_GROK_TRUST_ANSWER_LOG="$case_dir/grok-trust-answer.log" \
+    FM_FAKE_GROK_ECHO="$case_dir/grok-echo.log" \
+    FM_FAKE_GROK_POLL_COUNT="$case_dir/grok-poll-count" \
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_GROK_TRUST_POLLS=3 FM_GROK_TRUST_POLL_INTERVAL=0 \
@@ -214,6 +244,35 @@ EOF
   pass "fm-spawn: Grok detects an active trust frame above the visible slice and refuses its grant"
 }
 
+test_grok_trust_dialog_after_adopted_scrollback_fails() {
+  local rec case_dir home proj wt fakebin grok_home id out rc baseline polls
+  rec=$(make_spawn_case trust-stale)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  rc=0
+  out=$(FM_FAKE_GROK_MODE=stale run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id") || rc=$?
+  printf 'launched\n' > "$case_dir/baseline.state"
+  baseline=$(FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" FM_FAKE_GROK_MODE=stale \
+    FM_FAKE_GROK_ECHO="$case_dir/grok-echo.log" FM_FAKE_GROK_STATE="$case_dir/baseline.state" \
+    FM_FAKE_PANE_PATH="$wt" "$fakebin/tmux" capture-pane -p -t fake -S -200)
+  assert_contains "$baseline" "Weekly limit left:" \
+    "the adopted-scrollback fixture carried no prior session surface into the launch"
+  assert_not_contains "$baseline" "Do you trust the contents of this directory?" \
+    "the adopted-scrollback fixture already showed this launch's dialog before it rendered"
+  [ "$rc" -ne 0 ] || fail "grok spawn read an adopted session surface as proof that this launch has no trust dialog"
+  assert_contains "$out" "active project-folder trust dialog" \
+    "grok spawn did not report the trust gate that rendered after the adopted scrollback"
+  polls=$(cat "$case_dir/grok-poll-count")
+  [ "${polls:-0}" -ge 2 ] \
+    || fail "grok trust detection stopped polling on the first capture, before this launch had painted anything"
+  [ ! -s "$case_dir/grok-trust-answer.log" ] \
+    || fail "grok spawn answered the trust dialog instead of refusing it"
+  assert_not_contains "$out" "spawned $id" \
+    "grok trust refusal still reported a successful worker"
+  pass "fm-spawn: Grok ignores an adopted session surface and still catches the dialog this launch renders"
+}
+
 test_grok_historical_trust_dialog_does_not_block_dispatch() {
   local rec case_dir home proj wt fakebin grok_home id out rc
   rec=$(make_spawn_case trust-history)
@@ -255,5 +314,6 @@ SH
 test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
 test_grok_active_trust_dialog_below_visible_slice_fails
+test_grok_trust_dialog_after_adopted_scrollback_fails
 test_grok_historical_trust_dialog_does_not_block_dispatch
 test_fm_lock_recognizes_grok_holder
