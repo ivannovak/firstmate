@@ -600,16 +600,24 @@ Verified 2026-09-21 with grok 1.0.40 (eb1a2256660d) [stable] and tmux 3.7b on ma
 The token-free guard launched the installed Grok with no prompt in a fresh private git directory containing one inert project hook and a throwaway `GROK_HOME` carrying only a private copy of the existing authentication file.
 It never answered the dialog and verified that the throwaway home acquired no `trusted_folders.toml`.
 The real active frame matched the production classifier from bounded history, a clipped tail without the dialog did not match, and the same frame followed by a newer session surface did not match.
+The guard then shrank the pane to 80x5 with the dialog still waiting, which made Grok repaint a clipped frame - its header row and build footer, no title and no shortcuts - and pushed the complete frame above the visible slice.
+That is the state the gate exists for, and it is also proof that "nothing follows the complete frame" cannot be the test for one: the repaint that scrolls the dialog out of view is itself content after it.
+The guard asserts the modelled pane is one a terminal really produces by requiring the visible slice to be the tail of the same bounded history, then requires the classifier to call that history active, the clipped slice alone not active, and the history not superseded.
+Reverting only the trailing-content rule turned that arm red against the same live Grok, so it is not an inert control.
+One boundary was measured and is NOT covered. The recovery above needs the pane to have kept what the repaint displaced, and under tmux defaults Grok runs on the alternate screen with `history_size` 0, so the displaced frame is destroyed rather than scrolled.
+Launching grok 1.0.40 straight into an 80x6 pane with tmux defaults painted the title with the path and shortcuts clipped away and no `trusted_folders.toml` written, so the dialog was waiting while no capture anywhere held a complete frame and the classifier correctly reported none.
+That is a clipped-in-place frame rather than a displaced one, and refusing on it would mean reading a lone title row as active, which trades against the historical-scrollback half of the contract; it is recorded here as open rather than folded into this change.
 
 ```sh
 bin/fm-test-run.sh tests/fm-grok-trust-dialog-live-e2e.test.sh
 ```
 
 ```text
-ok - grok 1.0.40 (eb1a2256660d) [stable]: active trust frame recognized from bounded history; clipped and historical forms rejected
+ok - grok 1.0.40 (eb1a2256660d) [stable]: active trust frame recognized in view and scrolled above the visible slice; clipped and historical forms rejected
 ```
 
-The portable end-to-end regression is `tests/fm-grok-harness.test.sh`: its fake backend keeps the complete active frame in bounded history while the visible slice omits it, then separately keeps the same frame ahead of a current composer to prove historical text neither fails dispatch nor receives an answer.
+The portable end-to-end regression is `tests/fm-grok-harness.test.sh`: its fake backend keeps the complete active frame in bounded history while the visible slice omits it, ending that history with the clipped repaint so the visible slice is the tail of it and the pane is one real geometry produces, then separately keeps the same frame ahead of a current composer to prove historical text neither fails dispatch nor receives an answer.
+With `bin/fm-grok-trust.sh` and `bin/fm-spawn.sh` restored to their pre-fix form the below-fold case reports `grok spawn accepted an active project-folder trust dialog`, and dropping the session-surface guard from the classifier turns the historical case red instead, so neither half is satisfied by an inert control.
 A third case gives the pane a previous session's surface before the launch and renders the dialog only on the poll after that, which pins that an adopted endpoint's scrollback is never read as evidence about the launch that adopted it.
 A fourth wraps the launch echo into the three rows an 80-column pane with a 40-character prompt really produces, where no single row holds the staged file name, and asserts the gate still resolves its boundary on the first poll.
 A fifth paints over the echo row and leaves adopted scrollback holding an interior fragment of the staged path, which must not anchor the boundary, so the dialog that renders afterwards is still refused.

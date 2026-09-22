@@ -17,6 +17,15 @@ state=$(cat "$FM_FAKE_GROK_STATE" 2>/dev/null || true)
 render_dialog() {
   printf 'Do you trust the contents of this directory?\n%s\n                         Yes, proceed                 y\n                         No, quit                     n\n\nGrok Build  1.0.40 [stable]\n' "$FM_FAKE_PANE_PATH"
 }
+# The frame Grok repaints when the pane is too short to hold the dialog body:
+# its header row and build footer, with the title and shortcuts clipped away.
+# A rendered dialog can only end up above the visible slice because a repaint
+# like this one was painted after it, so bounded history ends with it and the
+# visible slice IS it - the pane geometry a real terminal produces, rather than
+# a visible slice that is no tail of the history it came from.
+render_clipped() {
+  printf '%s\n\n\n\nGrok Build  1.0.40 [stable]\n' "$FM_FAKE_PANE_PATH"
+}
 render_ready() {
   printf 'Tip: Use @ to attach files.\n╭────────────────────────────────╮\n│ ❯                              │\n╰── Weekly limit left: 50%% ──────╯\nShift+Tab:mode  │  Ctrl+x:shortcuts\nGrok Build  1.0.40 [stable]\n'
 }
@@ -127,9 +136,9 @@ case "${1:-}" in
     case "$state" in
       trust)
         if [ "$start" = -0 ]; then
-          printf '%s\n' "$FM_FAKE_PANE_PATH" 'Grok Build  1.0.40 [stable]'
+          render_clipped
         else
-          render_prior_session; render_launch_echo; render_dialog
+          render_prior_session; render_launch_echo; render_dialog; render_clipped
         fi
         ;;
       history) render_prior_session; render_launch_echo; render_dialog; render_ready ;;
@@ -259,7 +268,7 @@ EOF
 }
 
 test_grok_active_trust_dialog_below_visible_slice_fails() {
-  local rec case_dir home proj wt fakebin grok_home id out rc visible
+  local rec case_dir home proj wt fakebin grok_home id out rc visible bounded
   rec=$(make_spawn_case trust-active)
   IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
@@ -276,10 +285,21 @@ EOF
   visible=$(FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_GROK_STATE="$case_dir/grok.state" FM_FAKE_PANE_PATH="$wt" \
     "$fakebin/tmux" capture-pane -p -t fake -S -0)
+  bounded=$(FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_GROK_STATE="$case_dir/grok.state" FM_FAKE_PANE_PATH="$wt" \
+    "$fakebin/tmux" capture-pane -p -t fake -S -200)
   assert_not_contains "$visible" "Do you trust the contents of this directory?" \
     "the below-fold fixture left the active dialog title in its visible slice"
   assert_contains "$visible" "Grok Build  1.0.40 [stable]" \
     "the below-fold fixture did not retain the active Grok frame footer"
+  assert_contains "$bounded" "Do you trust the contents of this directory?" \
+    "the below-fold fixture kept no complete dialog frame in bounded history"
+  # A pane whose visible slice is not the tail of its own history is a pane no
+  # terminal geometry produces, and a gate proven only against one is proven
+  # against nothing.
+  [ "$(printf '%s\n' "$bounded" | tail -n "$(printf '%s\n' "$visible" | wc -l)")" \
+    = "$visible" ] \
+    || fail "the below-fold fixture modelled a pane whose visible slice is not the tail of its bounded history"
   [ ! -s "$case_dir/grok-trust-answer.log" ] \
     || fail "grok spawn answered the trust dialog instead of refusing it"
   assert_not_contains "$out" "spawned $id" \

@@ -325,8 +325,11 @@
 # Grok project configuration can gate a fresh worktree on a project-folder trust
 # dialog. Its title may sit above the visible slice of a short pane, so the
 # post-launch check reads bounded history and delegates the exact active-frame
-# predicate to bin/fm-grok-trust.sh. That predicate accepts only a complete final
-# dialog frame: later session output makes the same text historical and inert.
+# predicate to bin/fm-grok-trust.sh. That predicate anchors on the last complete
+# dialog frame in the capture and asks what follows it: Grok's own session surface
+# makes the text historical and inert, while a clipped repaint of the same frame -
+# the only thing that can put a rendered dialog above the fold at all - leaves it
+# waiting.
 # Bounded history can also predate this launch, because a relaunch adopts the
 # recorded endpoint and its scrollback, so the check classifies only what this
 # launch painted: the content after the staged launch line carrying this
@@ -3620,16 +3623,11 @@ grok_post_launch_content() { # <plain-pane-capture>
 # A normal Grok session can follow trust-dialog text that the backend retains
 # in scrollback. Only session evidence AFTER the last dialog marker proves that
 # the frame is historical; evidence before a newer partial frame proves nothing.
+# The classifier owns that predicate as well, because the same rows decide both
+# verdicts: what proves a dialog answered here is exactly what stops the active
+# frame from counting there, and two copies of it could disagree.
 grok_session_surface_follows_trust() { # <post-launch-pane-content>
-  printf '%s\n' "$1" | awk '
-    /Do you trust the contents of this directory\?/ ||
-      /Yes, proceed[[:space:]]+y[[:space:]]*$/ ||
-      /No, quit[[:space:]]+n[[:space:]]*$/ { trust = NR }
-    /Weekly limit left:/ || /Ctrl\+c:cancel/ || /Shift\+Tab:mode/ ||
-      /Ctrl\+x:shortcuts/ || /\[Dashboard\]/ || /Help improve Grok/ ||
-      /^[[:space:]]*Tip:/ || /│[[:space:]]*❯/ { session = NR }
-    END { exit !(session > trust) }
-  '
+  printf '%s\n' "$1" | "$FM_ROOT/bin/fm-grok-trust.sh" superseded
 }
 
 # The dialog normally paints before Grok submits its positional launch prompt.

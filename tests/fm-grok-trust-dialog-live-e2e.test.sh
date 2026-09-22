@@ -36,6 +36,8 @@ ISOLATED_HOME="$LAB/grok-home"
 SOCKET="fm-grok-trust-live-$$"
 SESSION="grok-trust"
 CAPTURE="$LAB/active.txt"
+SCROLLED="$LAB/scrolled-out.txt"
+SLICE="$LAB/visible-slice.txt"
 VERSION=$($REAL_GROK --version 2>&1 | head -1)
 
 cleanup_grok_trust_live() {
@@ -57,6 +59,13 @@ printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -x 80 -y 12 -c "$PROJECT" \
   "exec env GROK_HOME='$ISOLATED_HOME' '$REAL_GROK' --always-approve" \
   || fail "could not launch $VERSION in the isolated tmux server"
+# Grok runs on the alternate screen by default, where tmux keeps no history at
+# all, so a bounded read there returns the viewport and nothing above it. The
+# scrolled-out arm below needs the pane to retain what the resize pushed out of
+# view, so the option is turned off before Grok has started painting and the
+# arm asserts its own precondition rather than trusting that it took.
+"$REAL_TMUX" -L "$SOCKET" set-window-option -t "$SESSION" alternate-screen off \
+  || fail "could not disable the alternate screen for the isolated Grok pane"
 
 found=0
 for _ in $(seq 1 40); do
@@ -78,7 +87,41 @@ if { cat "$CAPTURE"; printf '%s\n' 'Tip: current Grok session' 'Weekly limit lef
   | "$CLASSIFIER" active; then
   fail "the classifier accepted trust text followed by a newer session surface"
 fi
+# The behavior the gate exists for: the dialog is still waiting, but the pane is
+# now too short to show it. Grok repaints a clipped frame - header row and build
+# footer, no title and no shortcuts - which is what pushes the complete frame
+# above the visible slice in the first place. So a complete frame is never the
+# last thing this capture holds, and any rule demanding that it be cannot fire
+# here at all.
+"$REAL_TMUX" -L "$SOCKET" resize-window -t "$SESSION" -x 80 -y 5 \
+  || fail "could not shrink the isolated Grok pane below its trust frame"
+repainted=0
+for _ in $(seq 1 40); do
+  "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -0 > "$SLICE" 2>/dev/null || true
+  "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -120 > "$SCROLLED" 2>/dev/null || true
+  if ! grep -Fq 'Do you trust the contents of this directory?' "$SLICE" \
+    && grep -Fq 'Do you trust the contents of this directory?' "$SCROLLED"; then
+    repainted=1
+    break
+  fi
+  sleep 0.1
+done
+[ "$repainted" -eq 1 ] \
+  || fail "$VERSION did not repaint its trust frame above the visible slice of a shortened pane"
+# A visible slice that is no tail of its own bounded history is a pane no
+# terminal geometry produces, and a verdict proven only against one proves
+# nothing about a real operator's pane.
+[ "$(tail -n "$(wc -l < "$SLICE")" "$SCROLLED")" = "$(cat "$SLICE")" ] \
+  || fail "the shortened pane's visible slice is not the tail of its own bounded history"
+"$CLASSIFIER" active < "$SCROLLED" \
+  || fail "$VERSION left a trust dialog waiting above the visible slice that the production classifier did not recognize"
+if "$CLASSIFIER" active < "$SLICE"; then
+  fail "the classifier read the clipped visible slice alone as an active trust frame"
+fi
+if "$CLASSIFIER" superseded < "$SCROLLED"; then
+  fail "the classifier read a clipped repaint of the waiting frame as a session that had moved past it"
+fi
 [ ! -e "$ISOLATED_HOME/trusted_folders.toml" ] \
   || fail "the live guard changed its isolated trust store despite never answering the dialog"
 
-printf 'ok - %s: active trust frame recognized from bounded history; clipped and historical forms rejected\n' "$VERSION"
+printf 'ok - %s: active trust frame recognized in view and scrolled above the visible slice; clipped and historical forms rejected\n' "$VERSION"
