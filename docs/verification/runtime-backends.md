@@ -611,6 +611,7 @@ ok - grok 1.0.40 (eb1a2256660d) [stable]: active trust frame recognized from bou
 
 The portable end-to-end regression is `tests/fm-grok-harness.test.sh`: its fake backend keeps the complete active frame in bounded history while the visible slice omits it, then separately keeps the same frame ahead of a current composer to prove historical text neither fails dispatch nor receives an answer.
 A third case gives the pane a previous session's surface before the launch and renders the dialog only on the poll after that, which pins that an adopted endpoint's scrollback is never read as evidence about the launch that adopted it.
+A fourth wraps the launch echo into the three rows an 80-column pane with a 40-character prompt really produces, where no single row holds the staged file name, and asserts the gate still resolves its boundary on the first poll.
 
 ## Codex hook trust
 

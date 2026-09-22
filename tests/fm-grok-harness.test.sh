@@ -27,9 +27,22 @@ render_prior_session() {
   render_ready
 }
 # The shell's echo of the staged launch line, which every real backend leaves in
-# the pane between the literal and the dialog this launch renders.
+# the pane between the literal and the dialog this launch renders. The wrapped
+# form is the geometry a real 80-column pane with a 40-character prompt produces:
+# three rows, none of which holds the whole staged file name.
 render_launch_echo() {
   [ -s "${FM_FAKE_GROK_ECHO:-/dev/null}" ] || return 0
+  if [ "${FM_FAKE_GROK_MODE:-ready}" = wrapped ]; then
+    awk '{
+      row = "demo-prompt-that-is-fortyish-chars-long % " $0
+      while (length(row) > 80) {
+        print substr(row, 1, 80)
+        row = substr(row, 81)
+      }
+      print row
+    }' "$FM_FAKE_GROK_ECHO"
+    return 0
+  fi
   cat "$FM_FAKE_GROK_ECHO"
 }
 case "$*" in
@@ -70,6 +83,7 @@ case "${1:-}" in
             active) printf 'trust\n' > "$FM_FAKE_GROK_STATE" ;;
             historical) printf 'history\n' > "$FM_FAKE_GROK_STATE" ;;
             stale) printf 'stale\n' > "$FM_FAKE_GROK_STATE" ;;
+            wrapped) printf 'history\n' > "$FM_FAKE_GROK_STATE" ;;
             *) printf 'ready\n' > "$FM_FAKE_GROK_STATE" ;;
           esac
         fi
@@ -84,6 +98,18 @@ case "${1:-}" in
       if [ "$prev" = -S ]; then start=$arg; break; fi
       [ "$arg" = -S ] && prev=-S || prev=
     done
+    # Every capture taken after the launch line was submitted is one poll of the
+    # trust gate, so suites can assert how far it had to look.
+    polls=0
+    case "$state" in
+      trust|history|ready|stale)
+        polls=$(cat "${FM_FAKE_GROK_POLL_COUNT:-/dev/null}" 2>/dev/null || true)
+        case "$polls" in ''|*[!0-9]*) polls=0 ;; esac
+        polls=$((polls + 1))
+        [ -z "${FM_FAKE_GROK_POLL_COUNT:-}" ] \
+          || printf '%s\n' "$polls" > "$FM_FAKE_GROK_POLL_COUNT"
+        ;;
+    esac
     case "$state" in
       trust)
         if [ "$start" = -0 ]; then
@@ -98,10 +124,6 @@ case "${1:-}" in
       stale)
         # This launch has painted nothing yet on its first poll; the dialog it
         # renders arrives only on the poll after that.
-        polls=$(cat "$FM_FAKE_GROK_POLL_COUNT" 2>/dev/null || true)
-        case "$polls" in ''|*[!0-9]*) polls=0 ;; esac
-        polls=$((polls + 1))
-        printf '%s\n' "$polls" > "$FM_FAKE_GROK_POLL_COUNT"
         render_prior_session
         render_launch_echo
         [ "$polls" -lt 2 ] || render_dialog
@@ -273,6 +295,37 @@ EOF
   pass "fm-spawn: Grok ignores an adopted session surface and still catches the dialog this launch renders"
 }
 
+test_grok_wrapped_launch_echo_keeps_post_launch_boundary() {
+  local rec case_dir home proj wt fakebin grok_home id out rc mark rows flat polls
+  rec=$(make_spawn_case trust-wrapped)
+  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
+$rec
+EOF
+  rc=0
+  out=$(FM_FAKE_GROK_MODE=wrapped run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id") || rc=$?
+  mark=$(sed -n "s/^\. '\(.*\)'\$/\1/p" "$case_dir/grok-echo.log")
+  mark=${mark##*/}
+  [ -n "$mark" ] || fail "the wrapped fixture recorded no staged launch line"
+  printf 'launched\n' > "$case_dir/baseline.state"
+  rows=$(FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" FM_FAKE_GROK_MODE=wrapped \
+    FM_FAKE_GROK_ECHO="$case_dir/grok-echo.log" FM_FAKE_GROK_STATE="$case_dir/baseline.state" \
+    FM_FAKE_PANE_PATH="$wt" "$fakebin/tmux" capture-pane -p -t fake -S -200)
+  printf '%s\n' "$rows" | grep -Fq "$mark" \
+    && fail "the wrapped fixture kept the staged launch file name inside a single captured row"
+  flat=$(printf '%s' "$rows" | tr -d '\n')
+  case "$flat" in
+    *"$mark"*) ;;
+    *) fail "the wrapped fixture lost the staged launch file name from its rows entirely" ;;
+  esac
+  expect_code 0 "$rc" "a wrapped launch echo must not fail an otherwise clean grok dispatch"
+  assert_contains "$out" "spawned $id harness=grok" \
+    "a wrapped launch echo prevented a successful spawn"
+  polls=$(cat "$case_dir/grok-poll-count")
+  [ "${polls:-0}" -eq 1 ] \
+    || fail "grok trust detection did not find its post-launch boundary across the wrapped launch echo; it polled ${polls:-0} times instead of once"
+  pass "fm-spawn: Grok locates its post-launch boundary when the launch echo wraps across rows"
+}
+
 test_grok_historical_trust_dialog_does_not_block_dispatch() {
   local rec case_dir home proj wt fakebin grok_home id out rc
   rec=$(make_spawn_case trust-history)
@@ -315,5 +368,6 @@ test_grok_hook_requires_registered_token
 test_grok_teardown_removes_pointer_and_token
 test_grok_active_trust_dialog_below_visible_slice_fails
 test_grok_trust_dialog_after_adopted_scrollback_fails
+test_grok_wrapped_launch_echo_keeps_post_launch_boundary
 test_grok_historical_trust_dialog_does_not_block_dispatch
 test_fm_lock_recognizes_grok_holder

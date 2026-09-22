@@ -331,8 +331,11 @@
 # recorded endpoint and its scrollback, so the check classifies only what this
 # launch painted: the content after the staged launch line carrying this
 # incarnation's nonce, or the whole capture once nothing the pre-launch read held
-# survives in it. While that boundary is unknown the check withholds its
-# no-dialog verdict rather than read a previous session's surface as this one's.
+# survives in it. That line is located across captured rows, not within one, and
+# the pre-launch read's own echo rows anchor it too, because a pane narrower than
+# the line wraps it into rows that no single-row match can find. While that
+# boundary is unknown the check withholds its no-dialog verdict rather than read
+# a previous session's surface as this one's.
 # Firstmate never answers the dialog because doing so grants project content and
 # hooks additional execution authority; a positively active frame fails and
 # rolls back the spawn instead of reporting a worker that never read its brief.
@@ -3532,14 +3535,16 @@ grok_capture() {
 
 # The pane this launch types into can already hold a previous Grok session: a
 # relaunch adopts the recorded endpoint and everything in its scrollback. These
-# three record what the pane held before the launch line was submitted, so the
+# four record what the pane held before the launch line was submitted, so the
 # trust check can tell that scrollback apart from what this launch paints.
 GROK_TRUST_BASELINE=
 GROK_TRUST_BASELINE_READ=0
 GROK_TRUST_LAUNCH_MARK=
+GROK_TRUST_LAUNCH_LINE=
 
-grok_trust_baseline() { # <launch-line-mark>
-  GROK_TRUST_LAUNCH_MARK=$1
+grok_trust_baseline() { # <launch-line> <launch-file-name>
+  GROK_TRUST_LAUNCH_LINE=$1
+  GROK_TRUST_LAUNCH_MARK=$2
   GROK_TRUST_BASELINE=
   GROK_TRUST_BASELINE_READ=0
   GROK_TRUST_BASELINE=$(fm_backend_capture "$BACKEND" "$T" 200 "$W" 2>/dev/null) || return 0
@@ -3549,25 +3554,56 @@ grok_trust_baseline() { # <launch-line-mark>
 # Print the part of <plain-pane-capture> that this launch painted, and fail when
 # the capture carries no proof of where that part starts. The staged launch line
 # is submitted into the pane by this incarnation and names a file whose nonce
-# belongs to it alone, so content after its last occurrence is this launch's own.
-# A capture that no longer holds it and retains no nonblank line the pre-launch
-# read held has scrolled or cleared past that read entirely, which makes all of
-# it post-launch. Anything else leaves the boundary unknown, including a
-# pre-launch read that failed outright.
+# belongs to it alone, so content after it is this launch's own. A pane narrower
+# than that line wraps it, and a bounded capture reports the wrapped rows
+# separately, so the name is searched across the concatenated rows and the
+# boundary is the row its last occurrence ends on. The pre-launch read anchors
+# the same line from the other side: its own rows that are contiguous pieces of
+# the submitted text are this launch's echo wherever they reappear, which still
+# places the boundary when the capture window has cut the name in half. A capture
+# that carries neither and retains no nonblank line the pre-launch read held has
+# scrolled or cleared past that read entirely, which makes all of it post-launch.
+# Anything else leaves the boundary unknown, including a pre-launch read that
+# failed outright.
 grok_post_launch_content() { # <plain-pane-capture>
   [ "$GROK_TRUST_BASELINE_READ" -eq 1 ] || return 1
   printf '%s\n' "$1" |
-    FM_GROK_TRUST_BASELINE="$GROK_TRUST_BASELINE" awk -v mark="$GROK_TRUST_LAUNCH_MARK" '
+    FM_GROK_TRUST_BASELINE="$GROK_TRUST_BASELINE" \
+      FM_GROK_TRUST_LAUNCH_LINE="$GROK_TRUST_LAUNCH_LINE" \
+      FM_GROK_TRUST_LAUNCH_MARK="$GROK_TRUST_LAUNCH_MARK" awk '
       BEGIN {
+        mark = ENVIRON["FM_GROK_TRUST_LAUNCH_MARK"]
+        literal = ENVIRON["FM_GROK_TRUST_LAUNCH_LINE"]
         n = split(ENVIRON["FM_GROK_TRUST_BASELINE"], prior, "\n")
         for (i = 1; i <= n; i++) {
-          if (prior[i] ~ /[^[:space:]]/) held[prior[i]] = 1
+          if (prior[i] !~ /[^[:space:]]/) { continue }
+          held[prior[i]] = 1
+          if (literal != "" && index(literal, prior[i])) { echoed[prior[i]] = 1 }
         }
       }
-      { line[NR] = $0 }
-      mark != "" && index($0, mark) { launched = NR }
+      {
+        line[NR] = $0
+        flat = flat $0
+        ends[NR] = length(flat)
+      }
+      $0 in echoed { anchored = NR }
       /[^[:space:]]/ && ($0 in held) { survives = 1 }
       END {
+        launched = 0
+        if (mark != "") {
+          from = 1
+          while ((at = index(substr(flat, from), mark)) > 0) {
+            hit = from + at - 1
+            from = hit + 1
+          }
+          if (hit > 0) {
+            stop = hit + length(mark) - 1
+            for (i = 1; i <= NR; i++) {
+              if (ends[i] >= stop) { launched = i; break }
+            }
+          }
+        }
+        if (anchored > launched) { launched = anchored }
         if (launched == 0 && survives) { exit 1 }
         for (i = launched + 1; i <= NR; i++) { print line[i] }
       }
@@ -4949,14 +4985,15 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   exit 1
 fi
 sleep 0.3
-spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
+LAUNCH_SOURCE_LINE=". $(shell_quote "$LAUNCH_FILE")"
+spawn_send_literal "$T" "$LAUNCH_SOURCE_LINE"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
 if [ "$HARNESS" = grok ]; then
-  grok_trust_baseline "$(basename "$LAUNCH_FILE")"
+  grok_trust_baseline "$LAUNCH_SOURCE_LINE" "$(basename "$LAUNCH_FILE")"
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = grok ] && grok_active_trust_dialog_detected; then
